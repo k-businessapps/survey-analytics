@@ -603,22 +603,39 @@ def main() -> None:
         st.error("Start date must be before or equal to end date.")
         st.stop()
 
-    if calculate or "ratings_df" not in st.session_state:
-        with st.spinner("Pulling ratings and dispositions from the APIs..."):
-            ratings_df, dispositions_df, merged_df = fetch_support_data(
-                api_key,
-                base_url,
-                combine_date_and_time(start_date, is_end=False),
-                combine_date_and_time(end_date, is_end=True),
-            )
+    if calculate:
+        try:
+            with st.spinner("Pulling ratings and dispositions from the APIs..."):
+                ratings_df, dispositions_df, merged_df = fetch_support_data(
+                    api_key,
+                    base_url,
+                    combine_date_and_time(start_date, is_end=False),
+                    combine_date_and_time(end_date, is_end=True),
+                )
             st.session_state["ratings_df"] = ratings_df
             st.session_state["dispositions_df"] = dispositions_df
             st.session_state["merged_df"] = merged_df
             st.session_state["fetched_start"] = start_date
             st.session_state["fetched_end"] = end_date
+            st.session_state["fetch_error"] = ""
+        except Exception as exc:
+            message = str(exc)
+            response = getattr(exc, "response", None)
+            if response is not None:
+                status = getattr(response, "status_code", "Unknown")
+                body = getattr(response, "text", "")
+                body = (body or "").strip()
+                if len(body) > 600:
+                    body = body[:600] + "..."
+                message = f"API request failed with status {status}. {body}" if body else f"API request failed with status {status}."
+            st.session_state["fetch_error"] = message
+            st.error(message)
+            if "ratings_df" not in st.session_state:
+                st.info("Fix the API issue, then click Calculate again.")
+                st.stop()
 
     if "ratings_df" not in st.session_state:
-        st.info("Choose a date range in the sidebar and click Calculate.")
+        st.info("Choose a date range in the sidebar and click Calculate. Data will not be fetched until you click the button.")
         st.stop()
 
     ratings_df = st.session_state["ratings_df"]
