@@ -30,7 +30,7 @@ from utils import (
 
 
 st.set_page_config(
-    page_title="KrispCall Support Analytics",
+    page_title="KrispCall Survey Analytics",
     page_icon="📞",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,12 +63,6 @@ class MetricResult:
 
 
 def calculate_csat(df: pd.DataFrame) -> MetricResult:
-    """
-    CSAT logic updated per request:
-    Only score 5 counts as satisfied.
-    CSAT % = count(score == 5) / total answered * 100
-    Empty / null values are excluded.
-    """
     if df.empty or "csat" not in df.columns:
         return MetricResult(score=None, answered=0, extra={})
 
@@ -77,7 +71,7 @@ def calculate_csat(df: pd.DataFrame) -> MetricResult:
     if total == 0:
         return MetricResult(score=None, answered=0, extra={})
 
-    satisfied = int((answered == 5).sum())
+    satisfied = int((answered >= 4).sum())
     score = (satisfied / total) * 100
     avg = round(float(answered.mean()), 2) if total else None
 
@@ -115,34 +109,39 @@ def inject_css() -> None:
                 background: linear-gradient(180deg, #fff 0%, {BRAND['bg']} 100%);
             }}
             .block-container {{
-                padding-top: 1.2rem;
+                padding-top: 1.0rem;
                 padding-bottom: 2rem;
+                max-width: 1500px;
             }}
             .brand-shell {{
                 display: flex;
                 align-items: center;
                 gap: 1rem;
-                padding: 0.3rem 0 1rem 0;
+                padding: 0.1rem 0 0.8rem 0;
             }}
             .brand-title {{
-                font-size: 2rem;
+                font-size: 1.85rem;
                 font-weight: 800;
                 color: {BRAND['ink']};
-                line-height: 1;
+                line-height: 1.15;
                 margin: 0;
             }}
             .brand-subtitle {{
                 color: {BRAND['muted']};
-                font-size: 0.95rem;
-                margin-top: 0.25rem;
+                font-size: 0.96rem;
+                margin-top: 0.2rem;
             }}
             .metric-card {{
                 background: {BRAND['card']};
                 border: 1px solid {BRAND['border']};
                 border-left: 6px solid {BRAND['neutral']};
                 border-radius: 18px;
-                padding: 1rem 1rem 0.9rem 1rem;
+                padding: 1rem 1rem 0.95rem 1rem;
                 box-shadow: 0 10px 35px rgba(55, 25, 78, 0.06);
+                min-height: 150px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
             }}
             .metric-card.poor {{ border-left-color: {BRAND['poor']}; }}
             .metric-card.good {{ border-left-color: {BRAND['good']}; }}
@@ -159,11 +158,12 @@ def inject_css() -> None:
                 font-size: 2rem;
                 font-weight: 800;
                 margin-top: 0.2rem;
+                line-height: 1.05;
             }}
             .metric-sub {{
                 color: {BRAND['muted']};
-                font-size: 0.9rem;
-                margin-top: 0.2rem;
+                font-size: 0.92rem;
+                margin-top: 0.45rem;
             }}
             .note-card {{
                 background: rgba(177, 76, 245, 0.06);
@@ -182,17 +182,17 @@ def inject_css() -> None:
 
 
 def render_brand_header() -> None:
-    logo_col, text_col = st.columns([1, 6], vertical_alignment="center")
+    logo_col, text_col = st.columns([1, 7], vertical_alignment="center")
     with logo_col:
         if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), width=120)
+            st.image(str(LOGO_PATH), width=118)
     with text_col:
         st.markdown(
-            f"""
+            """
             <div class="brand-shell">
                 <div>
-                    <div class="brand-title">KrispCall Support Analytics</div>
-                    <div class="brand-subtitle">Ratings, dispositions, NPS, CSAT, and FCR in one polished Streamlit dashboard.</div>
+                    <div class="brand-title">KrispCall Survey Analytics</div>
+                    <div class="brand-subtitle">Support survey performance across NPS, CSAT, FCR, ratings, and dispositions.</div>
                 </div>
             </div>
             """,
@@ -241,8 +241,10 @@ def render_metric_card(title: str, value: Optional[float], suffix: str, subtitle
     st.markdown(
         f"""
         <div class="metric-card {tone}">
-            <div class="metric-label">{title}</div>
-            <div class="metric-value">{display_value}{suffix}</div>
+            <div>
+                <div class="metric-label">{title}</div>
+                <div class="metric-value">{display_value}{suffix}</div>
+            </div>
             <div class="metric-sub">{subtitle}</div>
         </div>
         """,
@@ -345,14 +347,14 @@ def get_default_date_bounds(df: pd.DataFrame, column: str) -> Tuple[date, date]:
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
-    st.caption("Metrics use ratings only by default. When any disposition filter is selected, the scope is narrowed via the merged table without double counting ratings.")
+    st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
 
     with st.container(border=True):
-        f1, f2, f3, f4, f5, f6 = st.columns([1, 1, 1.4, 1.2, 1.2, 1.2])
+        f1, f2, f3, f4, f5, f6 = st.columns([0.9, 0.9, 1.4, 1.2, 1.2, 1.2])
         with f1:
-            start_date = st.date_input("Ratings created_at from", value=fetched_start, min_value=fetched_start, max_value=fetched_end, key="ov_start")
+            start_date = st.date_input("FROM", value=fetched_start, min_value=fetched_start, max_value=fetched_end, key="ov_start")
         with f2:
-            end_date = st.date_input("Ratings created_at to", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="ov_end")
+            end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="ov_end")
         with f3:
             operators = st.multiselect(
                 "Operator",
@@ -399,7 +401,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "NPS score",
             nps_result.score,
             "%",
-            f"Answered: {nps_result.answered}. 5 = promoter, 4 = neutral, 0-3 = detractor.",
+            f"Answered responses: {nps_result.answered}",
             metric_tone("nps", nps_result.score),
         )
     with c2:
@@ -407,7 +409,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "CSAT score",
             csat_result.score,
             "%",
-            f"Answered: {csat_result.answered}. 5 only = satisfied.",
+            f"Answered responses: {csat_result.answered}",
             metric_tone("csat", csat_result.score),
         )
     with c3:
@@ -415,7 +417,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "FCR resolution",
             fcr_result.score,
             "%",
-            f"Answered: {fcr_result.answered}. Formula: yes / total filled * 100.",
+            f"Answered responses: {fcr_result.answered}",
             metric_tone("fcr", fcr_result.score),
         )
 
@@ -451,7 +453,7 @@ def render_numeric_filter_controls(prefix: str, label: str, col_left, col_right)
 
 def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
     st.subheader("Ratings raw data")
-    st.caption("Validated columns from the export: created_at, last_operator_name, nps, csat, fcr, session_id, website_id, and chat_url.")
+    st.caption("Use date, operator, score, and FCR filters to inspect the raw ratings table.")
 
     min_date, max_date = get_default_date_bounds(ratings_df, "created_at_dt")
 
@@ -632,7 +634,7 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Scoring logic**")
     st.sidebar.markdown("- **NPS**: 5 = promoter, 4 = neutral, 0-3 = detractor")
-    st.sidebar.markdown("- **CSAT**: 5 only = satisfied")
+    st.sidebar.markdown("- **CSAT**: 4 and 5 = satisfied")
     st.sidebar.markdown("- **FCR**: yes / total filled")
     return start_date, end_date, calculate
 
