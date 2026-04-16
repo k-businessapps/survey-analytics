@@ -264,6 +264,24 @@ def add_percentage_labels(df: pd.DataFrame, count_col: str = "count") -> pd.Data
     return out
 
 
+def normalize_operator_first_name(series: pd.Series) -> pd.Series:
+    s = series.fillna("").astype(str).str.strip()
+    s = s.replace("", pd.NA)
+    return s.str.split().str[0]
+
+
+def get_response_session_count(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    work = df.copy()
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled"]
+    work = work[work["any_response"]].copy()
+    return work["session_id"].astype(str).nunique()
+
+
 def build_metric_chart(df: pd.DataFrame, title: str) -> alt.Chart:
     if df.empty:
         return alt.Chart(pd.DataFrame({"label": [], "count": [], "percentage_label": []})).mark_bar()
@@ -328,6 +346,38 @@ def build_csat_distribution_chart(df: pd.DataFrame) -> alt.Chart:
     return (bars + labels).properties(height=280, title="CSAT raw score distribution")
 
 
+def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
+    if df.empty:
+        return alt.Chart(pd.DataFrame({"operator_first_name": [], metric_col: [], "label": []})).mark_bar()
+
+    plot_df = df.copy()
+    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
+
+    base = alt.Chart(plot_df)
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
+        .encode(
+            x=alt.X("operator_first_name:N", sort="-y", title="Operator"),
+            y=alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[0, 100])),
+            tooltip=["operator_first_name", metric_col, "response_sessions", "answered_nps", "answered_csat", "answered_fcr"],
+        )
+    )
+    labels = (
+        base.mark_text(
+            dy=-10,
+            fontSize=12,
+            fontWeight="bold",
+            color=BRAND["ink"],
+        )
+        .encode(
+            x=alt.X("operator_first_name:N", sort="-y"),
+            y=alt.Y(f"{metric_col}:Q"),
+            text=alt.Text("label:N"),
+        )
+    )
+    return (bars + labels).properties(height=360, title=title)
+
+
 def filter_ratings_core(
     ratings_df: pd.DataFrame,
     start_date: Optional[date],
@@ -377,32 +427,52 @@ def compute_overview_dataset(
     return rating_scope, merged_filtered, True
 
 
-def normalize_operator_first_name(series: pd.Series) -> pd.Series:
-    s = series.fillna("").astype(str).str.strip()
-    s = s.replace("", pd.NA)
-    return s.str.split().str[0]
-
-
 def calculate_operator_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["operator_first_name", "nps_score", "csat_score", "fcr_score", "responses"])
+        return pd.DataFrame(
+            columns=[
+                "operator_first_name",
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
 
     work = df.copy()
     work["operator_first_name"] = normalize_operator_first_name(work["last_operator_name"])
     work = work[work["operator_first_name"].notna()].copy()
 
+    work["nps_filled"] = pd.to_numeric(work["nps"], errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work["csat"], errors="coerce").notna()
+    work["fcr_filled_flag"] = work["fcr_normalized"].fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
+
     rows = []
     for operator, grp in work.groupby("operator_first_name", dropna=True):
+        grp = grp.copy()
+        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
+        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
+        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
+        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
+
         nps_result = calculate_nps(grp)
         csat_result = calculate_csat(grp)
         fcr_result = calculate_fcr(grp)
+
         rows.append(
             {
                 "operator_first_name": operator,
                 "nps_score": nps_result.score,
                 "csat_score": csat_result.score,
                 "fcr_score": fcr_result.score,
-                "responses": len(grp),
+                "response_sessions": response_sessions,
+                "answered_nps": answered_nps,
+                "answered_csat": answered_csat,
+                "answered_fcr": answered_fcr,
             }
         )
 
@@ -410,40 +480,8 @@ def calculate_operator_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
-    out = out.sort_values(["responses", "operator_first_name"], ascending=[False, True]).reset_index(drop=True)
+    out = out.sort_values(["response_sessions", "operator_first_name"], ascending=[False, True]).reset_index(drop=True)
     return out
-
-
-def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
-    if df.empty:
-        return alt.Chart(pd.DataFrame({"operator_first_name": [], metric_col: [], "label": []})).mark_bar()
-
-    plot_df = df.copy()
-    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
-
-    base = alt.Chart(plot_df)
-    bars = (
-        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
-        .encode(
-            x=alt.X("operator_first_name:N", sort="-y", title="Operator"),
-            y=alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[0, 100])),
-            tooltip=["operator_first_name", metric_col, "responses"],
-        )
-    )
-    labels = (
-        base.mark_text(
-            dy=-10,
-            fontSize=12,
-            fontWeight="bold",
-            color=BRAND["ink"],
-        )
-        .encode(
-            x=alt.X("operator_first_name:N", sort="-y"),
-            y=alt.Y(f"{metric_col}:Q"),
-            text=alt.Text("label:N"),
-        )
-    )
-    return (bars + labels).properties(height=320, title=title)
 
 
 def get_default_date_bounds(df: pd.DataFrame, column: str) -> Tuple[date, date]:
@@ -456,7 +494,7 @@ def get_default_date_bounds(df: pd.DataFrame, column: str) -> Tuple[date, date]:
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
-    st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
+    st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions. Response total uses unique sessions with at least one of NPS, CSAT, or FCR filled.")
 
     with st.container(border=True):
         f1, f2, f3, f4, f5, f6 = st.columns([0.9, 0.9, 1.4, 1.2, 1.2, 1.2])
@@ -503,6 +541,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     nps_result = calculate_nps(metric_df)
     csat_result = calculate_csat(metric_df)
     fcr_result = calculate_fcr(metric_df)
+    response_sessions = get_response_session_count(metric_df)
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -510,7 +549,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "NPS score",
             nps_result.score,
             "%",
-            f"Answered responses: {nps_result.answered}",
+            f"Unique response sessions: {response_sessions}",
             metric_tone("nps", nps_result.score),
         )
     with c2:
@@ -518,7 +557,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "CSAT score",
             csat_result.score,
             "%",
-            f"Answered responses: {csat_result.answered}",
+            f"Unique response sessions: {response_sessions}",
             metric_tone("csat", csat_result.score),
         )
     with c3:
@@ -526,7 +565,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "FCR resolution",
             fcr_result.score,
             "%",
-            f"Answered responses: {fcr_result.answered}",
+            f"Unique response sessions: {response_sessions}",
             metric_tone("fcr", fcr_result.score),
         )
 
@@ -547,14 +586,14 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
         st.altair_chart(build_metric_chart(fcr_dist, "FCR distribution"), use_container_width=True)
 
     stats_left, stats_mid, stats_right = st.columns(3)
-    stats_left.metric("Ratings rows in scope", f"{len(metric_df):,}")
+    stats_left.metric("Unique response sessions", f"{response_sessions:,}")
     stats_mid.metric("Distinct sessions in scope", f"{metric_df['session_id'].nunique():,}" if not metric_df.empty else "0")
     stats_right.metric("Merged rows matched", f"{len(merged_filtered):,}" if using_dispositions else "0")
 
 
 def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("By operator")
-    st.caption("NPS, CSAT, and FCR percentages grouped by operator first name. For example, Alina and Alina Wang are grouped as Alina.")
+    st.caption("NPS, CSAT, and FCR percentages grouped by operator first name using last operator. Response counts use unique sessions with at least one of NPS, CSAT, or FCR filled.")
 
     with st.container(border=True):
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -564,7 +603,7 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="op_end")
         with c3:
             operators = st.multiselect(
-                "Operator",
+                "Last Operator",
                 options=normalize_text_options(ratings_df["last_operator_name"]),
                 key="op_operators",
             )
@@ -574,8 +613,8 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
 
     summary1, summary2, summary3 = st.columns(3)
     summary1.metric("Operators", f"{len(operator_df):,}")
-    summary2.metric("Rows in scope", f"{len(filtered):,}")
-    summary3.metric("Distinct sessions", f"{filtered['session_id'].nunique():,}" if not filtered.empty else "0")
+    summary2.metric("Unique response sessions", f"{get_response_session_count(filtered):,}")
+    summary3.metric("Distinct sessions in scope", f"{filtered['session_id'].nunique():,}" if not filtered.empty else "0")
 
     st.dataframe(
         operator_df,
@@ -586,26 +625,25 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
             "nps_score": st.column_config.NumberColumn("NPS %", format="%.1f"),
             "csat_score": st.column_config.NumberColumn("CSAT %", format="%.1f"),
             "fcr_score": st.column_config.NumberColumn("FCR %", format="%.1f"),
-            "responses": st.column_config.NumberColumn("Responses", format="%d"),
+            "response_sessions": st.column_config.NumberColumn("Response Sessions", format="%d"),
+            "answered_nps": st.column_config.NumberColumn("Answered NPS", format="%d"),
+            "answered_csat": st.column_config.NumberColumn("Answered CSAT", format="%d"),
+            "answered_fcr": st.column_config.NumberColumn("Answered FCR", format="%d"),
         },
     )
 
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        st.altair_chart(
-            build_operator_metric_chart(operator_df, "nps_score", "NPS by operator", BRAND["primary_dark"]),
-            use_container_width=True,
-        )
-    with g2:
-        st.altair_chart(
-            build_operator_metric_chart(operator_df, "csat_score", "CSAT by operator", BRAND["primary"]),
-            use_container_width=True,
-        )
-    with g3:
-        st.altair_chart(
-            build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]),
-            use_container_width=True,
-        )
+    st.altair_chart(
+        build_operator_metric_chart(operator_df, "nps_score", "NPS by operator", BRAND["primary_dark"]),
+        use_container_width=True,
+    )
+    st.altair_chart(
+        build_operator_metric_chart(operator_df, "csat_score", "CSAT by operator", BRAND["primary"]),
+        use_container_width=True,
+    )
+    st.altair_chart(
+        build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]),
+        use_container_width=True,
+    )
 
 
 def render_numeric_filter_controls(prefix: str, label: str, col_left, col_right):
@@ -630,7 +668,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
         with r2:
             end_date = st.date_input("Date to", value=max_date, min_value=min_date, max_value=max_date, key="ratings_end")
         with r3:
-            operators = st.multiselect("Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ratings_operators")
+            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ratings_operators")
         with r4:
             fcr_values = st.multiselect("FCR", options=normalize_text_options(ratings_df["fcr_normalized"]), key="ratings_fcr")
 
@@ -648,7 +686,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
     summary_left, summary_mid, summary_right = st.columns(3)
     summary_left.metric("Rows", f"{len(filtered):,}")
     summary_mid.metric("Distinct sessions", f"{filtered['session_id'].nunique():,}" if not filtered.empty else "0")
-    summary_right.metric("Operators", f"{filtered['last_operator_name'].nunique():,}" if not filtered.empty else "0")
+    summary_right.metric("Last Operators", f"{filtered['last_operator_name'].nunique():,}" if not filtered.empty else "0")
 
     page_size = st.selectbox("Rows per page", options=[25, 50, 100, 200], index=1, key="ratings_page_size")
     page = st.number_input("Page", min_value=1, value=1, step=1, key="ratings_page")
@@ -687,7 +725,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
         hide_index=True,
         column_config={
             "created_at": st.column_config.DatetimeColumn("Created at", format="YYYY-MM-DD HH:mm:ss"),
-            "last_operator_name": st.column_config.TextColumn("Operator"),
+            "last_operator_name": st.column_config.TextColumn("Last Operator"),
             "chat_link": st.column_config.LinkColumn("Link", display_text="Link"),
             "remarks": st.column_config.TextColumn("Remarks", width="large"),
         },
@@ -714,7 +752,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
 
         m5, m6, m7, m8 = st.columns([1.2, 1.2, 1.2, 1.2])
         with m5:
-            operators = st.multiselect("Rating operator", options=normalize_text_options(merged_df["rating_last_operator_name"]), key="merged_rating_operators")
+            operators = st.multiselect("Last Operator", options=normalize_text_options(merged_df["rating_last_operator_name"]), key="merged_rating_operators")
         with m6:
             categories = st.multiselect("Category", options=normalize_text_options(merged_df["category"]), key="merged_categories")
         with m7:
@@ -778,7 +816,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
         column_config={
             "rating_created_at": st.column_config.DatetimeColumn("Rating created_at", format="YYYY-MM-DD HH:mm:ss"),
             "disposition_created_at": st.column_config.DatetimeColumn("Disposition created_at", format="YYYY-MM-DD HH:mm:ss"),
-            "rating_last_operator_name": st.column_config.TextColumn("Operator"),
+            "rating_last_operator_name": st.column_config.TextColumn("Last Operator"),
             "chat_link": st.column_config.LinkColumn("Link", display_text="Link"),
             "dff": st.column_config.TextColumn("Disposition detail", width="large"),
             "remarks": st.column_config.TextColumn("Remarks", width="large"),
@@ -801,6 +839,7 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     st.sidebar.markdown("- **NPS**: 5 = promoter, 4 = neutral, 0-3 = detractor")
     st.sidebar.markdown("- **CSAT**: 4 and 5 = satisfied")
     st.sidebar.markdown("- **FCR**: yes / total filled")
+    st.sidebar.markdown("- **Response total**: unique sessions with at least one of NPS, CSAT, or FCR filled")
     return start_date, end_date, calculate
 
 
