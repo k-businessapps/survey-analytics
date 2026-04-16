@@ -109,7 +109,7 @@ def inject_css() -> None:
                 background: linear-gradient(180deg, #fff 0%, {BRAND['bg']} 100%);
             }}
             .block-container {{
-                padding-top: 1.0rem;
+                padding-top: 3.2rem;
                 padding-bottom: 2rem;
                 max-width: 1500px;
             }}
@@ -117,10 +117,10 @@ def inject_css() -> None:
                 display: flex;
                 align-items: center;
                 gap: 1rem;
-                padding: 0.1rem 0 0.8rem 0;
+                padding: 0.6rem 0 0.8rem 0;
             }}
             .brand-title {{
-                font-size: 1.85rem;
+                font-size: 1.65rem;
                 font-weight: 800;
                 color: {BRAND['ink']};
                 line-height: 1.15;
@@ -185,7 +185,7 @@ def render_brand_header() -> None:
     logo_col, text_col = st.columns([1, 7], vertical_alignment="center")
     with logo_col:
         if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), width=118)
+            st.image(str(LOGO_PATH), width=110)
     with text_col:
         st.markdown(
             """
