@@ -549,7 +549,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "NPS score",
             nps_result.score,
             "%",
-            f"Unique response sessions: {response_sessions}",
+            f"Answered responses: {nps_result.answered}",
             metric_tone("nps", nps_result.score),
         )
     with c2:
@@ -557,7 +557,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "CSAT score",
             csat_result.score,
             "%",
-            f"Unique response sessions: {response_sessions}",
+            f"Answered responses: {csat_result.answered}",
             metric_tone("csat", csat_result.score),
         )
     with c3:
@@ -565,7 +565,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "FCR resolution",
             fcr_result.score,
             "%",
-            f"Unique response sessions: {response_sessions}",
+            f"Answered responses: {fcr_result.answered}",
             metric_tone("fcr", fcr_result.score),
         )
 
