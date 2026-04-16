@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple, Any, Dict
 
 import altair as alt
 import pandas as pd
@@ -15,7 +15,6 @@ from utils import (
     build_csat_score_distribution,
     build_distribution_df,
     build_merged_df,
-    calculate_csat,
     calculate_fcr,
     calculate_nps,
     combine_date_and_time,
@@ -56,8 +55,50 @@ BRAND = {
 }
 
 
+class MetricResult:
+    def __init__(self, score: Optional[float], answered: int, extra: Dict[str, Any]):
+        self.score = score
+        self.answered = answered
+        self.extra = extra
+
+
+def calculate_csat(df: pd.DataFrame) -> MetricResult:
+    """
+    CSAT logic updated per request:
+    Only score 5 counts as satisfied.
+    CSAT % = count(score == 5) / total answered * 100
+    Empty / null values are excluded.
+    """
+    if df.empty or "csat" not in df.columns:
+        return MetricResult(score=None, answered=0, extra={})
+
+    answered = pd.to_numeric(df["csat"], errors="coerce").dropna()
+    total = len(answered)
+    if total == 0:
+        return MetricResult(score=None, answered=0, extra={})
+
+    satisfied = int((answered == 5).sum())
+    score = (satisfied / total) * 100
+    avg = round(float(answered.mean()), 2) if total else None
+
+    return MetricResult(
+        score=round(score, 1),
+        answered=total,
+        extra={
+            "Satisfied": satisfied,
+            "Not satisfied": total - satisfied,
+            "average": avg,
+        },
+    )
+
+
 @st.cache_data(show_spinner=False)
-def fetch_support_data(api_key: str, base_url: str, start_iso: str, end_iso: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def fetch_support_data(
+    api_key: str,
+    base_url: str,
+    start_iso: str,
+    end_iso: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ratings_rows = fetch_all_pages(api_key, base_url, RATINGS_ENDPOINT, start_iso, end_iso)
     dispositions_rows = fetch_all_pages(api_key, base_url, DISPOSITIONS_ENDPOINT, start_iso, end_iso)
     ratings_df = prepare_ratings_df(ratings_rows)
@@ -279,8 +320,18 @@ def compute_overview_dataset(
     merged_filtered = filter_multiselect(merged_filtered, "type", types)
     merged_filtered = filter_multiselect(merged_filtered, "sub_type", sub_types)
 
-    session_ids = merged_filtered["session_id"].dropna().unique().tolist()
-    rating_scope = ratings_filtered[ratings_filtered["session_id"].isin(session_ids)].copy()
+    matched_session_ids = (
+        merged_filtered["session_id"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    rating_scope = ratings_filtered[
+        ratings_filtered["session_id"].astype(str).isin(matched_session_ids)
+    ].copy()
+
     return rating_scope, merged_filtered, True
 
 
@@ -356,7 +407,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
             "CSAT score",
             csat_result.score,
             "%",
-            f"Answered: {csat_result.answered}. Top-2-box logic: 4-5 satisfied.",
+            f"Answered: {csat_result.answered}. 5 only = satisfied.",
             metric_tone("csat", csat_result.score),
         )
     with c3:
@@ -581,7 +632,7 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Scoring logic**")
     st.sidebar.markdown("- **NPS**: 5 = promoter, 4 = neutral, 0-3 = detractor")
-    st.sidebar.markdown("- **CSAT**: 4-5 = satisfied. Score = satisfied / total answered")
+    st.sidebar.markdown("- **CSAT**: 5 only = satisfied")
     st.sidebar.markdown("- **FCR**: yes / total filled")
     return start_date, end_date, calculate
 
