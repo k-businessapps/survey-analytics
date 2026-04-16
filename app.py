@@ -252,40 +252,80 @@ def render_metric_card(title: str, value: Optional[float], suffix: str, subtitle
     )
 
 
+def add_percentage_labels(df: pd.DataFrame, count_col: str = "count") -> pd.DataFrame:
+    out = df.copy()
+    total = out[count_col].sum()
+    if total and total > 0:
+        out["percentage"] = (out[count_col] / total * 100).round(1)
+        out["percentage_label"] = out["percentage"].map(lambda x: f"{x:.1f}%")
+    else:
+        out["percentage"] = 0.0
+        out["percentage_label"] = ""
+    return out
+
+
 def build_metric_chart(df: pd.DataFrame, title: str) -> alt.Chart:
     if df.empty:
-        return alt.Chart(pd.DataFrame({"label": [], "count": []})).mark_bar()
+        return alt.Chart(pd.DataFrame({"label": [], "count": [], "percentage_label": []})).mark_bar()
 
     color_scale = alt.Scale(
         domain=df["label"].tolist(),
         range=[BRAND["excellent"], BRAND["neutral"], BRAND["poor"]][: len(df)],
     )
-    return (
-        alt.Chart(df)
-        .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+
+    base = alt.Chart(df)
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
         .encode(
             x=alt.X("label:N", sort=None, title=None),
             y=alt.Y("count:Q", title="Count"),
             color=alt.Color("label:N", scale=color_scale, legend=None),
             tooltip=["label", "count", "percentage"],
         )
-        .properties(height=280, title=title)
     )
+    labels = (
+        base.mark_text(
+            dy=-10,
+            fontSize=12,
+            fontWeight="bold",
+            color=BRAND["ink"],
+        )
+        .encode(
+            x=alt.X("label:N", sort=None),
+            y=alt.Y("count:Q"),
+            text=alt.Text("percentage_label:N"),
+        )
+    )
+    return (bars + labels).properties(height=280, title=title)
 
 
 def build_csat_distribution_chart(df: pd.DataFrame) -> alt.Chart:
     if df.empty:
-        return alt.Chart(pd.DataFrame({"score": [], "count": []})).mark_bar()
-    return (
-        alt.Chart(df)
-        .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=BRAND["primary"])
+        return alt.Chart(pd.DataFrame({"score": [], "count": [], "percentage_label": []})).mark_bar()
+
+    base = alt.Chart(df)
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=BRAND["primary"])
         .encode(
             x=alt.X("score:O", title="CSAT score"),
             y=alt.Y("count:Q", title="Responses"),
-            tooltip=["score", "count"],
+            tooltip=["score", "count", "percentage"],
         )
-        .properties(height=280, title="CSAT raw score distribution")
     )
+    labels = (
+        base.mark_text(
+            dy=-10,
+            fontSize=12,
+            fontWeight="bold",
+            color=BRAND["ink"],
+        )
+        .encode(
+            x=alt.X("score:O"),
+            y=alt.Y("count:Q"),
+            text=alt.Text("percentage_label:N"),
+        )
+    )
+    return (bars + labels).properties(height=280, title="CSAT raw score distribution")
 
 
 def filter_ratings_core(
@@ -335,6 +375,75 @@ def compute_overview_dataset(
     ].copy()
 
     return rating_scope, merged_filtered, True
+
+
+def normalize_operator_first_name(series: pd.Series) -> pd.Series:
+    s = series.fillna("").astype(str).str.strip()
+    s = s.replace("", pd.NA)
+    return s.str.split().str[0]
+
+
+def calculate_operator_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["operator_first_name", "nps_score", "csat_score", "fcr_score", "responses"])
+
+    work = df.copy()
+    work["operator_first_name"] = normalize_operator_first_name(work["last_operator_name"])
+    work = work[work["operator_first_name"].notna()].copy()
+
+    rows = []
+    for operator, grp in work.groupby("operator_first_name", dropna=True):
+        nps_result = calculate_nps(grp)
+        csat_result = calculate_csat(grp)
+        fcr_result = calculate_fcr(grp)
+        rows.append(
+            {
+                "operator_first_name": operator,
+                "nps_score": nps_result.score,
+                "csat_score": csat_result.score,
+                "fcr_score": fcr_result.score,
+                "responses": len(grp),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    out = out.sort_values(["responses", "operator_first_name"], ascending=[False, True]).reset_index(drop=True)
+    return out
+
+
+def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
+    if df.empty:
+        return alt.Chart(pd.DataFrame({"operator_first_name": [], metric_col: [], "label": []})).mark_bar()
+
+    plot_df = df.copy()
+    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
+
+    base = alt.Chart(plot_df)
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
+        .encode(
+            x=alt.X("operator_first_name:N", sort="-y", title="Operator"),
+            y=alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[0, 100])),
+            tooltip=["operator_first_name", metric_col, "responses"],
+        )
+    )
+    labels = (
+        base.mark_text(
+            dy=-10,
+            fontSize=12,
+            fontWeight="bold",
+            color=BRAND["ink"],
+        )
+        .encode(
+            x=alt.X("operator_first_name:N", sort="-y"),
+            y=alt.Y(f"{metric_col}:Q"),
+            text=alt.Text("label:N"),
+        )
+    )
+    return (bars + labels).properties(height=320, title=title)
 
 
 def get_default_date_bounds(df: pd.DataFrame, column: str) -> Tuple[date, date]:
@@ -426,21 +535,77 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
 
     chart_col1, chart_col2, chart_col3 = st.columns(3)
     with chart_col1:
-        nps_dist = build_distribution_df("NPS", nps_result.extra, nps_result.answered)
+        nps_dist = add_percentage_labels(build_distribution_df("NPS", nps_result.extra, nps_result.answered))
         st.altair_chart(build_metric_chart(nps_dist, "NPS distribution"), use_container_width=True)
     with chart_col2:
-        csat_dist = build_csat_score_distribution(metric_df)
+        csat_dist = add_percentage_labels(build_csat_score_distribution(metric_df))
         st.altair_chart(build_csat_distribution_chart(csat_dist), use_container_width=True)
         avg = csat_result.extra.get("average") if csat_result.extra else None
         st.caption(f"Average CSAT: {avg if avg is not None else 'N/A'} / 5")
     with chart_col3:
-        fcr_dist = build_distribution_df("FCR", fcr_result.extra, fcr_result.answered)
+        fcr_dist = add_percentage_labels(build_distribution_df("FCR", fcr_result.extra, fcr_result.answered))
         st.altair_chart(build_metric_chart(fcr_dist, "FCR distribution"), use_container_width=True)
 
     stats_left, stats_mid, stats_right = st.columns(3)
     stats_left.metric("Ratings rows in scope", f"{len(metric_df):,}")
     stats_mid.metric("Distinct sessions in scope", f"{metric_df['session_id'].nunique():,}" if not metric_df.empty else "0")
     stats_right.metric("Merged rows matched", f"{len(merged_filtered):,}" if using_dispositions else "0")
+
+
+def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
+    st.subheader("By operator")
+    st.caption("NPS, CSAT, and FCR percentages grouped by operator first name. For example, Alina and Alina Wang are grouped as Alina.")
+
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            start_date = st.date_input("FROM", value=fetched_start, min_value=fetched_start, max_value=fetched_end, key="op_start")
+        with c2:
+            end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="op_end")
+        with c3:
+            operators = st.multiselect(
+                "Operator",
+                options=normalize_text_options(ratings_df["last_operator_name"]),
+                key="op_operators",
+            )
+
+    filtered = filter_ratings_core(ratings_df, start_date, end_date, operators)
+    operator_df = calculate_operator_metrics(filtered)
+
+    summary1, summary2, summary3 = st.columns(3)
+    summary1.metric("Operators", f"{len(operator_df):,}")
+    summary2.metric("Rows in scope", f"{len(filtered):,}")
+    summary3.metric("Distinct sessions", f"{filtered['session_id'].nunique():,}" if not filtered.empty else "0")
+
+    st.dataframe(
+        operator_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "operator_first_name": st.column_config.TextColumn("Operator"),
+            "nps_score": st.column_config.NumberColumn("NPS %", format="%.1f"),
+            "csat_score": st.column_config.NumberColumn("CSAT %", format="%.1f"),
+            "fcr_score": st.column_config.NumberColumn("FCR %", format="%.1f"),
+            "responses": st.column_config.NumberColumn("Responses", format="%d"),
+        },
+    )
+
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.altair_chart(
+            build_operator_metric_chart(operator_df, "nps_score", "NPS by operator", BRAND["primary_dark"]),
+            use_container_width=True,
+        )
+    with g2:
+        st.altair_chart(
+            build_operator_metric_chart(operator_df, "csat_score", "CSAT by operator", BRAND["primary"]),
+            use_container_width=True,
+        )
+    with g3:
+        st.altair_chart(
+            build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]),
+            use_container_width=True,
+        )
 
 
 def render_numeric_filter_controls(prefix: str, label: str, col_left, col_right):
@@ -703,9 +868,11 @@ def main() -> None:
         col_c.metric("Merged rows", f"{len(merged_df):,}")
         st.caption(f"Fetched range: {fetched_start.isoformat()} to {fetched_end.isoformat()}")
 
-    overview_tab, ratings_tab, merged_tab = st.tabs(["Overview", "Ratings", "Merged table"])
+    overview_tab, operator_tab, ratings_tab, merged_tab = st.tabs(["Overview", "By operator", "Ratings", "Merged table"])
     with overview_tab:
         render_overview_tab(ratings_df, merged_df, fetched_start, fetched_end)
+    with operator_tab:
+        render_operator_tab(ratings_df, fetched_start, fetched_end)
     with ratings_tab:
         render_ratings_tab(ratings_df)
     with merged_tab:
