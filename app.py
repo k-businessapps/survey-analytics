@@ -349,6 +349,39 @@ def build_csat_distribution_chart(df: pd.DataFrame) -> alt.Chart:
     return (bars + labels).properties(height=280, title="CSAT raw score distribution")
 
 
+
+
+def build_breakdown_metric_chart(df: pd.DataFrame, group_col: str, metric_col: str, title: str, color: str) -> alt.Chart:
+    if df.empty or group_col not in df.columns:
+        return alt.Chart(pd.DataFrame({group_col: [], metric_col: [], "label": []})).mark_bar()
+
+    plot_df = df.copy()
+    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
+
+    base = alt.Chart(plot_df)
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
+        .encode(
+            x=alt.X(f"{group_col}:N", sort="-y", title=None),
+            y=alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[-100, 100])),
+            tooltip=[group_col, metric_col, "response_sessions", "answered_nps", "answered_csat", "answered_fcr"],
+        )
+    )
+    labels = (
+        base.mark_text(
+            dy=alt.expr.if_(alt.datum[metric_col] >= 0, -10, 10),
+            fontSize=12,
+            fontWeight="bold",
+            color=BRAND["ink"],
+        )
+        .encode(
+            x=alt.X(f"{group_col}:N", sort="-y"),
+            y=alt.Y(f"{metric_col}:Q"),
+            text=alt.Text("label:N"),
+        )
+    )
+    return (bars + labels).properties(height=360, title=title)
+
 def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
     return build_breakdown_metric_chart(df, "operator_first_name", metric_col, title, color)
 
@@ -403,6 +436,98 @@ def compute_overview_dataset(
 
 
 
+
+
+
+def calculate_breakdown_metrics_from_merged(
+    merged_df: pd.DataFrame,
+    group_col: str,
+    selected_category: Optional[str] = None,
+) -> pd.DataFrame:
+    if merged_df.empty or group_col not in merged_df.columns:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    work = merged_df.copy()
+
+    if selected_category is not None and "category" in work.columns:
+        work = work[work["category"].fillna("").astype(str) == str(selected_category)].copy()
+
+    if work.empty:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    # Use unique sessions after merged filtering to avoid double counting repeated disposition rows
+    keep_cols = [
+        "session_id",
+        "nps",
+        "csat",
+        "fcr_normalized",
+        group_col,
+    ]
+    keep_cols = [c for c in keep_cols if c in work.columns]
+    work = work[keep_cols].copy()
+
+    work[group_col] = work[group_col].fillna("").astype(str).str.strip()
+    work = work[work[group_col] != ""].copy()
+
+    # One session contributes once to a given grouped bucket
+    work = work.drop_duplicates(subset=["session_id", group_col], keep="first").copy()
+
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
+
+    rows = []
+    for group_value, grp in work.groupby(group_col, dropna=True):
+        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
+        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
+        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
+        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
+
+        nps_result = calculate_nps(grp)
+        csat_result = calculate_csat(grp)
+        fcr_result = calculate_fcr(grp)
+
+        rows.append(
+            {
+                group_col: group_value,
+                "nps_score": nps_result.score,
+                "csat_score": csat_result.score,
+                "fcr_score": fcr_result.score,
+                "response_sessions": response_sessions,
+                "answered_nps": answered_nps,
+                "answered_csat": answered_csat,
+                "answered_fcr": answered_fcr,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
 
 def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     if df.empty or group_col not in df.columns:
