@@ -402,6 +402,63 @@ def compute_overview_dataset(
     return rating_scope, merged_filtered, True
 
 
+
+
+def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    if df.empty or group_col not in df.columns:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    work = df.copy()
+    work = work[work[group_col].notna()].copy()
+    work[group_col] = work[group_col].astype(str).str.strip()
+    work = work[work[group_col] != ""].copy()
+
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
+
+    rows = []
+    for group_value, grp in work.groupby(group_col, dropna=True):
+        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
+        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
+        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
+        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
+
+        nps_result = calculate_nps(grp)
+        csat_result = calculate_csat(grp)
+        fcr_result = calculate_fcr(grp)
+
+        rows.append(
+            {
+                group_col: group_value,
+                "nps_score": nps_result.score,
+                "csat_score": csat_result.score,
+                "fcr_score": fcr_result.score,
+                "response_sessions": response_sessions,
+                "answered_nps": answered_nps,
+                "answered_csat": answered_csat,
+                "answered_fcr": answered_fcr,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
+
 def calculate_operator_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(
