@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Optional, Tuple, Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import altair as alt
 import pandas as pd
@@ -21,7 +21,6 @@ from utils import (
     fetch_all_pages,
     filter_date_range,
     filter_multiselect,
-    metric_tone,
     normalize_text_options,
     paginate_dataframe,
     prepare_dispositions_df,
@@ -39,6 +38,7 @@ st.set_page_config(
 
 APP_DIR = Path(__file__).parent
 LOGO_PATH = APP_DIR / "assets" / "logo.png"
+
 BRAND = {
     "primary": "#B14CF5",
     "primary_dark": "#7E22CE",
@@ -62,28 +62,38 @@ class MetricResult:
         self.extra = extra
 
 
-def calculate_csat(df: pd.DataFrame) -> MetricResult:
-    if df.empty or "csat" not in df.columns:
-        return MetricResult(score=None, answered=0, extra={})
+# ----------------------------
+# Data + metric helpers
+# ----------------------------
 
-    answered = pd.to_numeric(df["csat"], errors="coerce").dropna()
-    total = len(answered)
-    if total == 0:
-        return MetricResult(score=None, answered=0, extra={})
 
-    promoters = int((answered == 5).sum())
-    neutral = int((answered == 4).sum())
-    detractors = int((answered <= 3).sum())
-    score = ((promoters - detractors) / total) * 100
-    avg = round(float(answered.mean()), 2) if total else None
+def calculate_csat(df: pd.DataFrame, column: str = "csat") -> MetricResult:
+    """CSAT scored with same formula style as NPS.
 
+    5 = promoter
+    4 = neutral
+    0-3 = detractor
+    score = (promoters - detractors) / answered * 100
+    """
+    if df.empty or column not in df.columns:
+        return MetricResult(score=None, answered=0, extra={"promoters": 0, "neutrals": 0, "detractors": 0, "average": None})
+
+    valid = pd.to_numeric(df[column], errors="coerce").dropna()
+    if valid.empty:
+        return MetricResult(score=None, answered=0, extra={"promoters": 0, "neutrals": 0, "detractors": 0, "average": None})
+
+    promoters = int((valid == 5).sum())
+    neutrals = int((valid == 4).sum())
+    detractors = int((valid <= 3).sum())
+    score = ((promoters - detractors) / len(valid)) * 100
+    avg = round(float(valid.mean()), 2)
     return MetricResult(
         score=round(score, 1),
-        answered=total,
+        answered=int(len(valid)),
         extra={
-            "Promoters": promoters,
-            "Neutral": neutral,
-            "Detractors": detractors,
+            "promoters": promoters,
+            "neutrals": neutrals,
+            "detractors": detractors,
             "average": avg,
         },
     )
@@ -102,6 +112,350 @@ def fetch_support_data(
     dispositions_df = prepare_dispositions_df(dispositions_rows)
     merged_df = build_merged_df(dispositions_df, ratings_df)
     return ratings_df, dispositions_df, merged_df
+
+
+
+def get_response_session_count(df: pd.DataFrame) -> int:
+    if df.empty or "session_id" not in df.columns:
+        return 0
+    work = df.copy()
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled"]
+    work = work[work["any_response"]].copy()
+    return work["session_id"].astype(str).nunique()
+
+
+
+def add_percentage_labels(df: pd.DataFrame, count_col: str = "count") -> pd.DataFrame:
+    out = df.copy()
+    total = out[count_col].sum() if count_col in out.columns else 0
+    if total and total > 0:
+        out["percentage"] = (out[count_col] / total * 100).round(1)
+        out["percentage_label"] = out["percentage"].map(lambda x: f"{x:.1f}%")
+    else:
+        out["percentage"] = 0.0
+        out["percentage_label"] = ""
+    return out
+
+
+
+def normalize_operator_first_name(series: pd.Series) -> pd.Series:
+    s = series.fillna("").astype(str).str.strip()
+    s = s.replace("", pd.NA)
+    return s.str.split().str[0]
+
+
+
+def score_tone(metric: str, score: Optional[float]) -> str:
+    if score is None:
+        return "neutral"
+    if metric in {"nps", "csat"}:
+        if score < 0:
+            return "poor"
+        if score < 50:
+            return "good"
+        return "excellent"
+    if metric == "fcr":
+        if score < 60:
+            return "poor"
+        if score < 80:
+            return "good"
+        return "excellent"
+    return "neutral"
+
+
+
+def filter_ratings_core(
+    ratings_df: pd.DataFrame,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    operators: list[str],
+) -> pd.DataFrame:
+    df = filter_date_range(ratings_df, "created_at_dt", start_date, end_date)
+    df = filter_multiselect(df, "last_operator_name", operators)
+    return df
+
+
+
+def compute_overview_dataset(
+    ratings_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    operators: list[str],
+    categories: list[str],
+    types: list[str],
+    sub_types: list[str],
+) -> Tuple[pd.DataFrame, pd.DataFrame, bool]:
+    ratings_filtered = filter_ratings_core(ratings_df, start_date, end_date, operators)
+
+    disposition_filter_selected = any([categories, types, sub_types])
+    if not disposition_filter_selected:
+        return ratings_filtered, merged_df.iloc[0:0].copy(), False
+
+    merged_filtered = merged_df.copy()
+    merged_filtered = filter_date_range(merged_filtered, "rating_created_at_dt", start_date, end_date)
+    merged_filtered = filter_multiselect(merged_filtered, "rating_last_operator_name", operators)
+    merged_filtered = filter_multiselect(merged_filtered, "category", categories)
+    merged_filtered = filter_multiselect(merged_filtered, "type", types)
+    merged_filtered = filter_multiselect(merged_filtered, "sub_type", sub_types)
+
+    matched_session_ids = (
+        merged_filtered["session_id"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    rating_scope = ratings_filtered[
+        ratings_filtered["session_id"].astype(str).isin(matched_session_ids)
+    ].copy()
+
+    return rating_scope, merged_filtered, True
+
+
+
+def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    if df.empty or group_col not in df.columns:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    work = df.copy()
+    work = work[work[group_col].notna()].copy()
+    work[group_col] = work[group_col].astype(str).str.strip()
+    work = work[work[group_col] != ""].copy()
+
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
+
+    rows = []
+    for group_value, grp in work.groupby(group_col, dropna=True):
+        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
+        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
+        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
+        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
+
+        nps_result = calculate_nps(grp)
+        csat_result = calculate_csat(grp)
+        fcr_result = calculate_fcr(grp)
+
+        rows.append(
+            {
+                group_col: group_value,
+                "nps_score": nps_result.score,
+                "csat_score": csat_result.score,
+                "fcr_score": fcr_result.score,
+                "response_sessions": response_sessions,
+                "answered_nps": answered_nps,
+                "answered_csat": answered_csat,
+                "answered_fcr": answered_fcr,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
+
+
+
+def calculate_breakdown_metrics_from_merged(
+    merged_df: pd.DataFrame,
+    group_col: str,
+    selected_category: Optional[str] = None,
+) -> pd.DataFrame:
+    if merged_df.empty or group_col not in merged_df.columns:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    work = merged_df.copy()
+    if selected_category is not None and "category" in work.columns:
+        work = work[work["category"].fillna("").astype(str) == str(selected_category)].copy()
+
+    if work.empty:
+        return pd.DataFrame(
+            columns=[
+                group_col,
+                "nps_score",
+                "csat_score",
+                "fcr_score",
+                "response_sessions",
+                "answered_nps",
+                "answered_csat",
+                "answered_fcr",
+            ]
+        )
+
+    keep_cols = [c for c in ["session_id", "nps", "csat", "fcr_normalized", group_col] if c in work.columns]
+    work = work[keep_cols].copy()
+    work[group_col] = work[group_col].fillna("").astype(str).str.strip()
+    work = work[work[group_col] != ""].copy()
+    work = work.drop_duplicates(subset=["session_id", group_col], keep="first").copy()
+
+    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
+    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
+    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
+    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
+
+    rows = []
+    for group_value, grp in work.groupby(group_col, dropna=True):
+        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
+        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
+        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
+        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
+
+        nps_result = calculate_nps(grp)
+        csat_result = calculate_csat(grp)
+        fcr_result = calculate_fcr(grp)
+
+        rows.append(
+            {
+                group_col: group_value,
+                "nps_score": nps_result.score,
+                "csat_score": csat_result.score,
+                "fcr_score": fcr_result.score,
+                "response_sessions": response_sessions,
+                "answered_nps": answered_nps,
+                "answered_csat": answered_csat,
+                "answered_fcr": answered_fcr,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
+
+
+# ----------------------------
+# Visualization helpers
+# ----------------------------
+
+
+def build_metric_chart(df: pd.DataFrame, title: str, color_mode: str = "distribution") -> alt.Chart:
+    if df.empty:
+        return alt.Chart(pd.DataFrame({"label": [], "count": [], "percentage_label": []})).mark_bar()
+
+    if color_mode == "distribution":
+        color_scale = alt.Scale(
+            domain=df["label"].tolist(),
+            range=[BRAND["excellent"], BRAND["neutral"], BRAND["poor"]][: len(df)],
+        )
+        color_encoding = alt.Color("label:N", scale=color_scale, legend=None)
+    else:
+        color_encoding = alt.value(BRAND["primary"])
+
+    base = alt.Chart(df)
+    y = alt.Y("count:Q", title="Count")
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+        .encode(
+            x=alt.X("label:N", sort=None, title=None),
+            y=y,
+            color=color_encoding,
+            tooltip=["label", "count", "percentage"],
+        )
+    )
+    labels = (
+        base.mark_text(dy=-10, fontSize=12, fontWeight="bold", color=BRAND["ink"])
+        .encode(
+            x=alt.X("label:N", sort=None),
+            y=y,
+            text=alt.Text("percentage_label:N"),
+        )
+    )
+    return (bars + labels).properties(height=280, title=title)
+
+
+
+def build_csat_score_distribution_chart(df: pd.DataFrame) -> alt.Chart:
+    if df.empty:
+        return alt.Chart(pd.DataFrame({"score": [], "count": [], "percentage_label": []})).mark_bar()
+
+    plot_df = df.copy()
+    base = alt.Chart(plot_df)
+    y = alt.Y("count:Q", title="Responses")
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=BRAND["primary"])
+        .encode(
+            x=alt.X("score:O", title="CSAT score"),
+            y=y,
+            tooltip=["score", "count", "percentage"],
+        )
+    )
+    labels = (
+        base.mark_text(dy=-10, fontSize=12, fontWeight="bold", color=BRAND["ink"])
+        .encode(
+            x=alt.X("score:O"),
+            y=y,
+            text=alt.Text("percentage_label:N"),
+        )
+    )
+    return (bars + labels).properties(height=280, title="CSAT raw score distribution")
+
+
+
+def build_breakdown_metric_chart(df: pd.DataFrame, group_col: str, metric_col: str, title: str, color: str) -> alt.Chart:
+    if df.empty or group_col not in df.columns:
+        return alt.Chart(pd.DataFrame({group_col: [], metric_col: [], "label": []})).mark_bar()
+
+    plot_df = df.copy()
+    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
+
+    base = alt.Chart(plot_df)
+    y = alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[-100, 100]))
+    bars = (
+        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
+        .encode(
+            x=alt.X(f"{group_col}:N", sort="-y", title=None),
+            y=y,
+            tooltip=[group_col, metric_col, "response_sessions", "answered_nps", "answered_csat", "answered_fcr"],
+        )
+    )
+    labels = (
+        base.mark_text(dy=-10, fontSize=12, fontWeight="bold", color=BRAND["ink"])
+        .encode(
+            x=alt.X(f"{group_col}:N", sort="-y"),
+            y=y,
+            text=alt.Text("label:N"),
+        )
+    )
+    return (bars + labels).properties(height=360, title=title)
+
+
+
+def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
+    return build_breakdown_metric_chart(df, "operator_first_name", metric_col, title, color)
+
+
+# ----------------------------
+# Styling + auth
+# ----------------------------
 
 
 def inject_css() -> None:
@@ -184,6 +538,7 @@ def inject_css() -> None:
     )
 
 
+
 def render_brand_header() -> None:
     logo_col, text_col = st.columns([1, 7], vertical_alignment="center")
     with logo_col:
@@ -201,6 +556,7 @@ def render_brand_header() -> None:
             """,
             unsafe_allow_html=True,
         )
+
 
 
 def check_auth() -> bool:
@@ -228,11 +584,13 @@ def check_auth() -> bool:
     return False
 
 
+
 def get_api_config() -> Tuple[str, str]:
     api_secrets = st.secrets.get("api", {})
     api_key = api_secrets.get("key", "")
     base_url = api_secrets.get("base_url", "https://api.supportapps.krispcall.biz")
     return api_key, base_url
+
 
 
 def render_metric_card(title: str, value: Optional[float], suffix: str, subtitle: str, tone: str) -> None:
@@ -255,367 +613,14 @@ def render_metric_card(title: str, value: Optional[float], suffix: str, subtitle
     )
 
 
-def add_percentage_labels(df: pd.DataFrame, count_col: str = "count") -> pd.DataFrame:
-    out = df.copy()
-    total = out[count_col].sum()
-    if total and total > 0:
-        out["percentage"] = (out[count_col] / total * 100).round(1)
-        out["percentage_label"] = out["percentage"].map(lambda x: f"{x:.1f}%")
-    else:
-        out["percentage"] = 0.0
-        out["percentage_label"] = ""
-    return out
-
-
-def normalize_operator_first_name(series: pd.Series) -> pd.Series:
-    s = series.fillna("").astype(str).str.strip()
-    s = s.replace("", pd.NA)
-    return s.str.split().str[0]
-
-
-def get_response_session_count(df: pd.DataFrame) -> int:
-    if df.empty:
-        return 0
-    work = df.copy()
-    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
-    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
-    work["fcr_filled"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
-    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled"]
-    work = work[work["any_response"]].copy()
-    return work["session_id"].astype(str).nunique()
-
-
-def build_metric_chart(df: pd.DataFrame, title: str) -> alt.Chart:
-    if df.empty:
-        return alt.Chart(pd.DataFrame({"label": [], "count": [], "percentage_label": []})).mark_bar()
-
-    color_scale = alt.Scale(
-        domain=df["label"].tolist(),
-        range=[BRAND["excellent"], BRAND["neutral"], BRAND["poor"]][: len(df)],
-    )
-
-    base = alt.Chart(df)
-    bars = (
-        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
-        .encode(
-            x=alt.X("label:N", sort=None, title=None),
-            y=alt.Y("count:Q", title="Count"),
-            color=alt.Color("label:N", scale=color_scale, legend=None),
-            tooltip=["label", "count", "percentage"],
-        )
-    )
-    labels = (
-        base.mark_text(
-            dy=-10,
-            fontSize=12,
-            fontWeight="bold",
-            color=BRAND["ink"],
-        )
-        .encode(
-            x=alt.X("label:N", sort=None),
-            y=alt.Y("count:Q"),
-            text=alt.Text("percentage_label:N"),
-        )
-    )
-    return (bars + labels).properties(height=280, title=title)
-
-
-def build_csat_distribution_chart(df: pd.DataFrame) -> alt.Chart:
-    if df.empty:
-        return alt.Chart(pd.DataFrame({"score": [], "count": [], "percentage_label": []})).mark_bar()
-
-    base = alt.Chart(df)
-    bars = (
-        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=BRAND["primary"])
-        .encode(
-            x=alt.X("score:O", title="CSAT score"),
-            y=alt.Y("count:Q", title="Responses"),
-            tooltip=["score", "count", "percentage"],
-        )
-    )
-    labels = (
-        base.mark_text(
-            dy=-10,
-            fontSize=12,
-            fontWeight="bold",
-            color=BRAND["ink"],
-        )
-        .encode(
-            x=alt.X("score:O"),
-            y=alt.Y("count:Q"),
-            text=alt.Text("percentage_label:N"),
-        )
-    )
-    return (bars + labels).properties(height=280, title="CSAT raw score distribution")
-
-
-
-
-def build_breakdown_metric_chart(df: pd.DataFrame, group_col: str, metric_col: str, title: str, color: str) -> alt.Chart:
-    if df.empty or group_col not in df.columns:
-        return alt.Chart(pd.DataFrame({group_col: [], metric_col: [], "label": []})).mark_bar()
-
-    plot_df = df.copy()
-    plot_df["label"] = plot_df[metric_col].apply(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
-
-    base = alt.Chart(plot_df)
-    bars = (
-        base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=color)
-        .encode(
-            x=alt.X(f"{group_col}:N", sort="-y", title=None),
-            y=alt.Y(f"{metric_col}:Q", title="Percentage", scale=alt.Scale(domain=[-100, 100])),
-            tooltip=[group_col, metric_col, "response_sessions", "answered_nps", "answered_csat", "answered_fcr"],
-        )
-    )
-    labels = (
-        base.mark_text(
-            dy=alt.expr.if_(alt.datum[metric_col] >= 0, -10, 10),
-            fontSize=12,
-            fontWeight="bold",
-            color=BRAND["ink"],
-        )
-        .encode(
-            x=alt.X(f"{group_col}:N", sort="-y"),
-            y=alt.Y(f"{metric_col}:Q"),
-            text=alt.Text("label:N"),
-        )
-    )
-    return (bars + labels).properties(height=360, title=title)
-
-def build_operator_metric_chart(df: pd.DataFrame, metric_col: str, title: str, color: str) -> alt.Chart:
-    return build_breakdown_metric_chart(df, "operator_first_name", metric_col, title, color)
-
-
-def filter_ratings_core(
-    ratings_df: pd.DataFrame,
-    start_date: Optional[date],
-    end_date: Optional[date],
-    operators: list[str],
-) -> pd.DataFrame:
-    df = filter_date_range(ratings_df, "created_at_dt", start_date, end_date)
-    df = filter_multiselect(df, "last_operator_name", operators)
-    return df
-
-
-def compute_overview_dataset(
-    ratings_df: pd.DataFrame,
-    merged_df: pd.DataFrame,
-    start_date: Optional[date],
-    end_date: Optional[date],
-    operators: list[str],
-    categories: list[str],
-    types: list[str],
-    sub_types: list[str],
-) -> Tuple[pd.DataFrame, pd.DataFrame, bool]:
-    ratings_filtered = filter_ratings_core(ratings_df, start_date, end_date, operators)
-
-    disposition_filter_selected = any([categories, types, sub_types])
-    if not disposition_filter_selected:
-        return ratings_filtered, merged_df.iloc[0:0].copy(), False
-
-    merged_filtered = merged_df.copy()
-    merged_filtered = filter_date_range(merged_filtered, "rating_created_at_dt", start_date, end_date)
-    merged_filtered = filter_multiselect(merged_filtered, "rating_last_operator_name", operators)
-    merged_filtered = filter_multiselect(merged_filtered, "category", categories)
-    merged_filtered = filter_multiselect(merged_filtered, "type", types)
-    merged_filtered = filter_multiselect(merged_filtered, "sub_type", sub_types)
-
-    matched_session_ids = (
-        merged_filtered["session_id"]
-        .dropna()
-        .astype(str)
-        .drop_duplicates()
-        .tolist()
-    )
-
-    rating_scope = ratings_filtered[
-        ratings_filtered["session_id"].astype(str).isin(matched_session_ids)
-    ].copy()
-
-    return rating_scope, merged_filtered, True
-
-
-
-
-
-
-def calculate_breakdown_metrics_from_merged(
-    merged_df: pd.DataFrame,
-    group_col: str,
-    selected_category: Optional[str] = None,
-) -> pd.DataFrame:
-    if merged_df.empty or group_col not in merged_df.columns:
-        return pd.DataFrame(
-            columns=[
-                group_col,
-                "nps_score",
-                "csat_score",
-                "fcr_score",
-                "response_sessions",
-                "answered_nps",
-                "answered_csat",
-                "answered_fcr",
-            ]
-        )
-
-    work = merged_df.copy()
-
-    if selected_category is not None and "category" in work.columns:
-        work = work[work["category"].fillna("").astype(str) == str(selected_category)].copy()
-
-    if work.empty:
-        return pd.DataFrame(
-            columns=[
-                group_col,
-                "nps_score",
-                "csat_score",
-                "fcr_score",
-                "response_sessions",
-                "answered_nps",
-                "answered_csat",
-                "answered_fcr",
-            ]
-        )
-
-    # Use unique sessions after merged filtering to avoid double counting repeated disposition rows
-    keep_cols = [
-        "session_id",
-        "nps",
-        "csat",
-        "fcr_normalized",
-        group_col,
-    ]
-    keep_cols = [c for c in keep_cols if c in work.columns]
-    work = work[keep_cols].copy()
-
-    work[group_col] = work[group_col].fillna("").astype(str).str.strip()
-    work = work[work[group_col] != ""].copy()
-
-    # One session contributes once to a given grouped bucket
-    work = work.drop_duplicates(subset=["session_id", group_col], keep="first").copy()
-
-    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
-    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
-    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
-    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
-
-    rows = []
-    for group_value, grp in work.groupby(group_col, dropna=True):
-        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
-        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
-        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
-        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
-
-        nps_result = calculate_nps(grp)
-        csat_result = calculate_csat(grp)
-        fcr_result = calculate_fcr(grp)
-
-        rows.append(
-            {
-                group_col: group_value,
-                "nps_score": nps_result.score,
-                "csat_score": csat_result.score,
-                "fcr_score": fcr_result.score,
-                "response_sessions": response_sessions,
-                "answered_nps": answered_nps,
-                "answered_csat": answered_csat,
-                "answered_fcr": answered_fcr,
-            }
-        )
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-
-    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
-
-def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    if df.empty or group_col not in df.columns:
-        return pd.DataFrame(
-            columns=[
-                group_col,
-                "nps_score",
-                "csat_score",
-                "fcr_score",
-                "response_sessions",
-                "answered_nps",
-                "answered_csat",
-                "answered_fcr",
-            ]
-        )
-
-    work = df.copy()
-    work = work[work[group_col].notna()].copy()
-    work[group_col] = work[group_col].astype(str).str.strip()
-    work = work[work[group_col] != ""].copy()
-
-    work["nps_filled"] = pd.to_numeric(work.get("nps"), errors="coerce").notna()
-    work["csat_filled"] = pd.to_numeric(work.get("csat"), errors="coerce").notna()
-    work["fcr_filled_flag"] = work.get("fcr_normalized", pd.Series(index=work.index, dtype="object")).fillna("").astype(str).str.strip().ne("")
-    work["any_response"] = work["nps_filled"] | work["csat_filled"] | work["fcr_filled_flag"]
-
-    rows = []
-    for group_value, grp in work.groupby(group_col, dropna=True):
-        answered_nps = grp.loc[grp["nps_filled"], "session_id"].astype(str).nunique()
-        answered_csat = grp.loc[grp["csat_filled"], "session_id"].astype(str).nunique()
-        answered_fcr = grp.loc[grp["fcr_filled_flag"], "session_id"].astype(str).nunique()
-        response_sessions = grp.loc[grp["any_response"], "session_id"].astype(str).nunique()
-
-        nps_result = calculate_nps(grp)
-        csat_result = calculate_csat(grp)
-        fcr_result = calculate_fcr(grp)
-
-        rows.append(
-            {
-                group_col: group_value,
-                "nps_score": nps_result.score,
-                "csat_score": csat_result.score,
-                "fcr_score": fcr_result.score,
-                "response_sessions": response_sessions,
-                "answered_nps": answered_nps,
-                "answered_csat": answered_csat,
-                "answered_fcr": answered_fcr,
-            }
-        )
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-
-    return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
-
-def calculate_operator_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "operator_first_name",
-                "nps_score",
-                "csat_score",
-                "fcr_score",
-                "response_sessions",
-                "answered_nps",
-                "answered_csat",
-                "answered_fcr",
-            ]
-        )
-
-    work = df.copy()
-    work["operator_first_name"] = normalize_operator_first_name(work["last_operator_name"])
-    work = work[work["operator_first_name"].notna()].copy()
-    return calculate_breakdown_metrics_from_ratings(work, "operator_first_name")
-
-
-def get_default_date_bounds(df: pd.DataFrame, column: str) -> Tuple[date, date]:
-    if df.empty or column not in df.columns or df[column].dropna().empty:
-        today = date.today()
-        return today, today
-    series = pd.to_datetime(df[column], utc=True, errors="coerce").dropna()
-    return series.min().date(), series.max().date()
+# ----------------------------
+# Tab renderers
+# ----------------------------
 
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
-    st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions. Response total uses unique sessions with at least one of NPS, CSAT, or FCR filled.")
+    st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
 
     with st.container(border=True):
         f1, f2, f3, f4, f5, f6 = st.columns([0.9, 0.9, 1.4, 1.2, 1.2, 1.2])
@@ -624,29 +629,13 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
         with f2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="ov_end")
         with f3:
-            operators = st.multiselect(
-                "Operator",
-                options=normalize_text_options(ratings_df["last_operator_name"]),
-                key="ov_operators",
-            )
+            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ov_operators")
         with f4:
-            categories = st.multiselect(
-                "Disposition category",
-                options=normalize_text_options(merged_df["category"] if "category" in merged_df else pd.Series(dtype="object")),
-                key="ov_categories",
-            )
+            categories = st.multiselect("Disposition category", options=normalize_text_options(merged_df["category"] if "category" in merged_df else pd.Series(dtype="object")), key="ov_categories")
         with f5:
-            types = st.multiselect(
-                "Disposition type",
-                options=normalize_text_options(merged_df["type"] if "type" in merged_df else pd.Series(dtype="object")),
-                key="ov_types",
-            )
+            types = st.multiselect("Disposition type", options=normalize_text_options(merged_df["type"] if "type" in merged_df else pd.Series(dtype="object")), key="ov_types")
         with f6:
-            sub_types = st.multiselect(
-                "Disposition sub_type",
-                options=normalize_text_options(merged_df["sub_type"] if "sub_type" in merged_df else pd.Series(dtype="object")),
-                key="ov_sub_types",
-            )
+            sub_types = st.multiselect("Disposition sub_type", options=normalize_text_options(merged_df["sub_type"] if "sub_type" in merged_df else pd.Series(dtype="object")), key="ov_sub_types")
 
     metric_df, merged_filtered, using_dispositions = compute_overview_dataset(
         ratings_df,
@@ -666,29 +655,11 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        render_metric_card(
-            "NPS score",
-            nps_result.score,
-            "%",
-            f"Unique response sessions: {response_sessions}",
-            metric_tone("nps", nps_result.score),
-        )
+        render_metric_card("NPS score", nps_result.score, "%", f"Answered responses: {nps_result.answered}", score_tone("nps", nps_result.score))
     with c2:
-        render_metric_card(
-            "CSAT score",
-            csat_result.score,
-            "%",
-            f"Unique response sessions: {response_sessions}",
-            metric_tone("csat", csat_result.score),
-        )
+        render_metric_card("CSAT score", csat_result.score, "%", f"Answered responses: {csat_result.answered}", score_tone("csat", csat_result.score))
     with c3:
-        render_metric_card(
-            "FCR resolution",
-            fcr_result.score,
-            "%",
-            f"Unique response sessions: {response_sessions}",
-            metric_tone("fcr", fcr_result.score),
-        )
+        render_metric_card("FCR resolution", fcr_result.score, "%", f"Answered responses: {fcr_result.answered}", score_tone("fcr", fcr_result.score))
 
     note = "Disposition filters are active. Metrics are being scoped through the merged table." if using_dispositions else "No disposition filters are active. Metrics are based on the ratings table only."
     st.markdown(f'<div class="note-card">{note}</div>', unsafe_allow_html=True)
@@ -698,8 +669,8 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
         nps_dist = add_percentage_labels(build_distribution_df("NPS", nps_result.extra, nps_result.answered))
         st.altair_chart(build_metric_chart(nps_dist, "NPS distribution"), use_container_width=True)
     with chart_col2:
-        csat_dist = add_percentage_labels(build_csat_score_distribution(metric_df))
-        st.altair_chart(build_csat_distribution_chart(csat_dist), use_container_width=True)
+        csat_raw_dist = add_percentage_labels(build_csat_score_distribution(metric_df))
+        st.altair_chart(build_csat_score_distribution_chart(csat_raw_dist), use_container_width=True)
         avg = csat_result.extra.get("average") if csat_result.extra else None
         st.caption(f"Average CSAT: {avg if avg is not None else 'N/A'} / 5")
     with chart_col3:
@@ -712,9 +683,10 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     stats_right.metric("Merged rows matched", f"{len(merged_filtered):,}" if using_dispositions else "0")
 
 
+
 def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("By operator")
-    st.caption("NPS, CSAT, and FCR percentages grouped by operator first name using last operator. Response counts use unique sessions with at least one of NPS, CSAT, or FCR filled.")
+    st.caption("NPS, CSAT, and FCR percentages grouped by operator first name using last operator. For example, Alina and Alina Wang are grouped as Alina.")
 
     with st.container(border=True):
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -723,14 +695,12 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
         with c2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="op_end")
         with c3:
-            operators = st.multiselect(
-                "Last Operator",
-                options=normalize_text_options(ratings_df["last_operator_name"]),
-                key="op_operators",
-            )
+            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="op_operators")
 
     filtered = filter_ratings_core(ratings_df, start_date, end_date, operators)
-    operator_df = calculate_operator_metrics(filtered)
+    filtered = filtered.copy()
+    filtered["operator_first_name"] = normalize_operator_first_name(filtered["last_operator_name"])
+    operator_df = calculate_breakdown_metrics_from_ratings(filtered, "operator_first_name")
 
     summary1, summary2, summary3 = st.columns(3)
     summary1.metric("Operators", f"{len(operator_df):,}")
@@ -753,69 +723,43 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
         },
     )
 
-    st.altair_chart(
-        build_operator_metric_chart(operator_df, "nps_score", "NPS by operator", BRAND["primary_dark"]),
-        use_container_width=True,
-    )
-    st.altair_chart(
-        build_operator_metric_chart(operator_df, "csat_score", "CSAT by operator", BRAND["primary"]),
-        use_container_width=True,
-    )
-    st.altair_chart(
-        build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]),
-        use_container_width=True,
-    )
+    st.altair_chart(build_operator_metric_chart(operator_df, "nps_score", "NPS by operator", BRAND["primary_dark"]), use_container_width=True)
+    st.altair_chart(build_operator_metric_chart(operator_df, "csat_score", "CSAT by operator", BRAND["primary"]), use_container_width=True)
+    st.altair_chart(build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]), use_container_width=True)
+
 
 
 def render_disposition_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("By disposition")
-    st.caption("Disposition performance using the same session-based response logic. Visualizations focus on one category at a time, then break down by type and sub-type within that category.")
+    st.caption("Focus on one category at a time. The breakdown below shows Type and Sub-Type metrics scoped through unique matched sessions.")
 
-    category_options = normalize_text_options(merged_df["category"]) if "category" in merged_df.columns else []
-    if not category_options:
-        st.info("No disposition categories are available in the current data scope.")
-        return
-
+    category_options = normalize_text_options(merged_df["category"]) if "category" in merged_df else []
     with st.container(border=True):
-        c1, c2, c3, c4 = st.columns([1, 1, 1.4, 1.4])
+        c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
         with c1:
             start_date = st.date_input("FROM", value=fetched_start, min_value=fetched_start, max_value=fetched_end, key="disp_start")
         with c2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="disp_end")
         with c3:
-            selected_category = st.selectbox("Category", options=category_options, key="disp_category")
-        with c4:
             operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="disp_operators")
+        with c4:
+            selected_category = st.selectbox("Category", options=category_options, index=0 if category_options else None, key="disp_category")
 
-    ratings_filtered = filter_ratings_core(ratings_df, start_date, end_date, operators)
-    merged_filtered = merged_df.copy()
-    merged_filtered = filter_date_range(merged_filtered, "rating_created_at_dt", start_date, end_date)
-    merged_filtered = filter_multiselect(merged_filtered, "rating_last_operator_name", operators)
-    merged_filtered = merged_filtered[merged_filtered["category"].fillna("").astype(str) == selected_category].copy()
+    filtered_merged = filter_date_range(merged_df, "rating_created_at_dt", start_date, end_date)
+    filtered_merged = filter_multiselect(filtered_merged, "rating_last_operator_name", operators)
+    if selected_category:
+        filtered_merged = filtered_merged[filtered_merged["category"].fillna("").astype(str) == str(selected_category)].copy()
 
-    matched_sessions = merged_filtered["session_id"].dropna().astype(str).drop_duplicates().tolist()
-    category_scope = ratings_filtered[ratings_filtered["session_id"].astype(str).isin(matched_sessions)].copy()
+    matched_sessions = filtered_merged["session_id"].dropna().astype(str).drop_duplicates().tolist()
+    rating_scope = ratings_df[ratings_df["session_id"].astype(str).isin(matched_sessions)].copy()
 
-    nps_result = calculate_nps(category_scope)
-    csat_result = calculate_csat(category_scope)
-    fcr_result = calculate_fcr(category_scope)
-    response_sessions = get_response_session_count(category_scope)
+    summary1, summary2, summary3 = st.columns(3)
+    summary1.metric("Unique response sessions", f"{get_response_session_count(rating_scope):,}")
+    summary2.metric("Distinct matched sessions", f"{len(matched_sessions):,}")
+    summary3.metric("Merged rows in category", f"{len(filtered_merged):,}")
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        render_metric_card("NPS score", nps_result.score, "%", f"Answered responses: {nps_result.answered}", metric_tone("nps", nps_result.score))
-    with c2:
-        render_metric_card("CSAT score", csat_result.score, "%", f"Answered responses: {csat_result.answered}", metric_tone("csat", csat_result.score))
-    with c3:
-        render_metric_card("FCR resolution", fcr_result.score, "%", f"Answered responses: {fcr_result.answered}", metric_tone("fcr", fcr_result.score))
-
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Selected category", selected_category)
-    s2.metric("Unique response sessions", f"{response_sessions:,}")
-    s3.metric("Matched disposition rows", f"{len(merged_filtered):,}")
-
-    type_df = calculate_breakdown_metrics_from_merged(merged_filtered, ratings_filtered, "type")
-    subtype_df = calculate_breakdown_metrics_from_merged(merged_filtered, ratings_filtered, "sub_type")
+    type_df = calculate_breakdown_metrics_from_merged(filtered_merged, "type", selected_category)
+    subtype_df = calculate_breakdown_metrics_from_merged(filtered_merged, "sub_type", selected_category)
 
     st.markdown("#### Type breakdown")
     st.dataframe(
@@ -833,11 +777,11 @@ def render_disposition_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fe
             "answered_fcr": st.column_config.NumberColumn("Answered FCR", format="%d"),
         },
     )
-    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "nps_score", "NPS by type", BRAND["primary_dark"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "csat_score", "CSAT by type", BRAND["primary"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "fcr_score", "FCR by type", BRAND["secondary"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "nps_score", f"NPS by type · {selected_category}", BRAND["primary_dark"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "csat_score", f"CSAT by type · {selected_category}", BRAND["primary"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(type_df, "type", "fcr_score", f"FCR by type · {selected_category}", BRAND["secondary"]), use_container_width=True)
 
-    st.markdown("#### Sub-type breakdown")
+    st.markdown("#### Sub-Type breakdown")
     st.dataframe(
         subtype_df,
         use_container_width=True,
@@ -853,9 +797,10 @@ def render_disposition_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fe
             "answered_fcr": st.column_config.NumberColumn("Answered FCR", format="%d"),
         },
     )
-    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "nps_score", "NPS by sub-type", BRAND["primary_dark"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "csat_score", "CSAT by sub-type", BRAND["primary"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "fcr_score", "FCR by sub-type", BRAND["secondary"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "nps_score", f"NPS by sub-type · {selected_category}", BRAND["primary_dark"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "csat_score", f"CSAT by sub-type · {selected_category}", BRAND["primary"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(subtype_df, "sub_type", "fcr_score", f"FCR by sub-type · {selected_category}", BRAND["secondary"]), use_container_width=True)
+
 
 
 def render_numeric_filter_controls(prefix: str, label: str, col_left, col_right):
@@ -866,9 +811,10 @@ def render_numeric_filter_controls(prefix: str, label: str, col_left, col_right)
     return operator, value
 
 
+
 def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
     st.subheader("Ratings raw data")
-    st.caption("Use date, operator, score, and FCR filters to inspect the raw ratings table.")
+    st.caption("Use date, last operator, score, and FCR filters to inspect the raw ratings table.")
 
     min_date, max_date = get_default_date_bounds(ratings_df, "created_at_dt")
 
@@ -905,7 +851,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
     page_df, total_pages = paginate_dataframe(filtered, int(page), int(page_size))
     st.caption(f"Page {min(int(page), total_pages)} of {total_pages}")
 
-    display_df = page_df[[
+    display_cols = [
         "created_at",
         "last_operator_name",
         "name",
@@ -917,19 +863,8 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
         "session_id",
         "website_id",
         "chat_link",
-    ]].copy() if not page_df.empty else pd.DataFrame(columns=[
-        "created_at",
-        "last_operator_name",
-        "name",
-        "email",
-        "nps",
-        "csat",
-        "fcr",
-        "remarks",
-        "session_id",
-        "website_id",
-        "chat_link",
-    ])
+    ]
+    display_df = page_df[display_cols].copy() if not page_df.empty else pd.DataFrame(columns=display_cols)
 
     st.dataframe(
         display_df,
@@ -942,6 +877,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
             "remarks": st.column_config.TextColumn("Remarks", width="large"),
         },
     )
+
 
 
 def render_merged_tab(merged_df: pd.DataFrame) -> None:
@@ -1036,6 +972,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
     )
 
 
+
 def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     st.sidebar.header("Data pull")
     st.sidebar.caption("Pull fresh data from the KrispCall support APIs, then slice it inside the app.")
@@ -1049,10 +986,11 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Scoring logic**")
     st.sidebar.markdown("- **NPS**: 5 = promoter, 4 = neutral, 0-3 = detractor")
-    st.sidebar.markdown("- **CSAT**: 5 = promoter, 4 = neutral, 0-3 = detractor, then (promoters - detractors) / answered * 100")
+    st.sidebar.markdown("- **CSAT**: same formula as NPS")
     st.sidebar.markdown("- **FCR**: yes / total filled")
     st.sidebar.markdown("- **Response total**: unique sessions with at least one of NPS, CSAT, or FCR filled")
     return start_date, end_date, calculate
+
 
 
 def main() -> None:
@@ -1119,7 +1057,9 @@ def main() -> None:
         col_c.metric("Merged rows", f"{len(merged_df):,}")
         st.caption(f"Fetched range: {fetched_start.isoformat()} to {fetched_end.isoformat()}")
 
-    overview_tab, operator_tab, disposition_tab, ratings_tab, merged_tab = st.tabs(["Overview", "By operator", "By disposition", "Ratings", "Merged table"])
+    overview_tab, operator_tab, disposition_tab, ratings_tab, merged_tab = st.tabs(
+        ["Overview", "By operator", "By disposition", "Ratings", "Merged table"]
+    )
     with overview_tab:
         render_overview_tab(ratings_df, merged_df, fetched_start, fetched_end)
     with operator_tab:
