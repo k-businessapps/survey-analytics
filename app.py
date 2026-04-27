@@ -577,15 +577,27 @@ def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date
 
     ts = pd.to_datetime(df["created_at_dt"], utc=True, errors="coerce").dt.tz_localize(None)
     df["_ts"] = ts
+    df = df[df["_ts"].notna()].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["period_start", "metric", "score"])
 
     if granularity == "Daily":
-        df["period_start"] = df["_ts"].dt.floor("D")
+        df["period_start"] = df["_ts"].dt.normalize()
         full_periods = pd.date_range(pd.Timestamp(start_date), pd.Timestamp(end_date), freq="D")
+
     elif granularity == "Weekly":
-        df["period_start"] = df["_ts"].dt.to_period("W-MON").apply(lambda r: r.start_time)
-        aligned_start = pd.Timestamp(start_date) - pd.to_timedelta(pd.Timestamp(start_date).weekday(), unit="D")
-        aligned_end = pd.Timestamp(end_date)
-        full_periods = pd.date_range(aligned_start.normalize(), aligned_end.normalize(), freq="W-MON")
+        df["_day"] = df["_ts"].dt.normalize()
+        df["period_start"] = df["_day"] - pd.to_timedelta(df["_day"].dt.weekday, unit="D")
+
+        aligned_start = pd.Timestamp(start_date).normalize()
+        aligned_start = aligned_start - pd.to_timedelta(aligned_start.weekday(), unit="D")
+
+        aligned_end = pd.Timestamp(end_date).normalize()
+        aligned_end = aligned_end - pd.to_timedelta(aligned_end.weekday(), unit="D")
+
+        full_periods = pd.date_range(aligned_start, aligned_end, freq="7D")
+
     else:
         df["period_start"] = df["_ts"].dt.to_period("M").dt.to_timestamp()
         full_periods = pd.date_range(pd.Timestamp(start_date).replace(day=1), pd.Timestamp(end_date), freq="MS")
@@ -607,7 +619,6 @@ def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date
     merged = template.merge(scored_df, on=["period_start", "metric"], how="left")
     return merged
 
-
 def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granularity: str) -> alt.Chart:
     plot_df = df[df["metric"].isin(selected_metrics)].copy()
     if plot_df.empty:
@@ -615,26 +626,57 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
 
     color_scale = alt.Scale(
         domain=["NPS", "CSAT", "FCR"],
-        range=[BRAND["primary_dark"], BRAND["primary"], BRAND["secondary"]],
+        range=["#2563EB", "#F59E0B", "#10B981"],
     )
 
     tooltip_title = f"{granularity} period"
-    base = alt.Chart(plot_df)
-    line = (
-        base.mark_line(point=True)
+
+    nearest = alt.selection_point(
+        nearest=True,
+        on="pointerover",
+        fields=["period_start"],
+        empty=False,
+    )
+
+    base = alt.Chart(plot_df).encode(
+        x=alt.X("period_start:T", title=tooltip_title),
+        y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
+        color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
+    )
+
+    line = base.mark_line(strokeWidth=2.5)
+
+    selectors = (
+        alt.Chart(plot_df)
+        .mark_point(opacity=0)
+        .encode(x=alt.X("period_start:T"))
+        .add_params(nearest)
+    )
+
+    points = base.mark_point(size=75).encode(
+        opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+    )
+
+    rules = (
+        alt.Chart(plot_df)
+        .mark_rule(color="#94A3B8")
+        .encode(x=alt.X("period_start:T"))
+        .transform_filter(nearest)
+    )
+
+    tooltip_points = (
+        base.mark_point(size=1, opacity=0)
         .encode(
-            x=alt.X("period_start:T", title=tooltip_title),
-            y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
-            color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
             tooltip=[
                 alt.Tooltip("period_start:T", title=tooltip_title),
                 alt.Tooltip("metric:N", title="Metric"),
                 alt.Tooltip("score:Q", title="Score", format=".1f"),
-            ],
+            ]
         )
+        .transform_filter(nearest)
     )
-    return line.properties(height=340, title="Timeline")
 
+    return alt.layer(line, selectors, points, rules, tooltip_points).properties(height=360, title="Timeline")
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
