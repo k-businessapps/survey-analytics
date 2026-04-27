@@ -488,7 +488,7 @@ def check_auth() -> bool:
         with st.form("login_form", clear_on_submit=False):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login", use_container_width=True)
+            submitted = st.form_submit_button("Login", width="stretch")
 
         if submitted:
             if username == correct_username and password == correct_password:
@@ -565,25 +565,50 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     note = "Disposition filters are active. Metrics are being scoped through the merged table." if using_dispositions else "No disposition filters are active. Metrics are based on the ratings table only."
     st.markdown(f'<div class="note-card">{note}</div>', unsafe_allow_html=True)
 
-    nps_dist = add_percentage_labels(build_distribution_df("NPS", nps_result.extra, nps_result.answered))
-    csat_score_dist = add_percentage_labels(build_csat_score_distribution(metric_df))
-    fcr_dist = add_percentage_labels(build_distribution_df("FCR", fcr_result.extra, fcr_result.answered))
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.altair_chart(build_metric_chart(nps_dist, "NPS distribution"), use_container_width=True)
-    with col2:
-        st.altair_chart(build_csat_score_distribution_chart(csat_score_dist), use_container_width=True)
+    chart_col1, chart_col2, chart_col3 = st.columns(3)
+    with chart_col1:
+        nps_dist = add_percentage_labels(build_distribution_df("NPS", nps_result.extra, nps_result.answered))
+        st.altair_chart(build_metric_chart(nps_dist, "NPS distribution"), width="stretch")
+    with chart_col2:
+        csat_dist = add_percentage_labels(build_csat_score_distribution(metric_df))
+        st.altair_chart(build_csat_score_distribution_chart(csat_dist), width="stretch")
         avg = csat_result.extra.get("average") if csat_result.extra else None
         st.caption(f"Average CSAT: {avg if avg is not None else 'N/A'} / 5")
-    with col3:
-        st.altair_chart(build_metric_chart(fcr_dist, "FCR distribution"), use_container_width=True)
+    with chart_col3:
+        fcr_dist = add_percentage_labels(build_distribution_df("FCR", fcr_result.extra, fcr_result.answered))
+        st.altair_chart(build_metric_chart(fcr_dist, "FCR distribution"), width="stretch")
 
     stats_left, stats_mid, stats_right = st.columns(3)
     stats_left.metric("Unique response sessions", f"{response_sessions:,}")
     stats_mid.metric("Distinct sessions in scope", f"{metric_df['session_id'].nunique():,}" if not metric_df.empty else "0")
     stats_right.metric("Merged rows matched", f"{len(merged_filtered):,}" if using_dispositions else "0")
 
+    st.markdown("### Timeline")
+    st.caption("This timeline is based on the overall fetched ratings data for the selected date window. It does not use the overview filters above.")
+
+    default_granularity = get_default_timeline_granularity(fetched_start, fetched_end)
+    tl1, tl2 = st.columns([1.2, 2.4])
+    with tl1:
+        granularity = st.radio(
+            "Group by",
+            options=["Daily", "Weekly", "Monthly"],
+            index=["Daily", "Weekly", "Monthly"].index(default_granularity),
+            horizontal=True,
+            key="timeline_granularity",
+        )
+    with tl2:
+        selected_metrics = st.multiselect(
+            "Show metrics",
+            options=["NPS", "CSAT", "FCR"],
+            default=["NPS", "CSAT", "FCR"],
+            key="timeline_metrics",
+        )
+
+    timeline_df = build_timeline_frame(ratings_df, granularity)
+    if selected_metrics and not timeline_df.empty:
+        st.altair_chart(build_timeline_chart(timeline_df, selected_metrics), width="stretch")
+    else:
+        st.info("No timeline data is available for the current fetched range.")
 
 def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("By operator")
@@ -609,7 +634,7 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
 
     st.dataframe(
         operator_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "operator_first_name": st.column_config.TextColumn("Operator"),
@@ -623,9 +648,9 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
         },
     )
 
-    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "nps_score", "NPS by operator", BRAND["primary_dark"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "csat_score", "CSAT by operator", BRAND["primary"]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "fcr_score", "FCR by operator", BRAND["secondary"]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "nps_score", "NPS by operator", BRAND["primary_dark"]), width="stretch")
+    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "csat_score", "CSAT by operator", BRAND["primary"]), width="stretch")
+    st.altair_chart(build_breakdown_metric_chart(operator_df, "operator_first_name", "fcr_score", "FCR by operator", BRAND["secondary"]), width="stretch")
 
 
 def render_disposition_section(title_prefix: str, df: pd.DataFrame, group_col: str, color_triplet: Tuple[str, str, str]) -> None:
@@ -637,7 +662,7 @@ def render_disposition_section(title_prefix: str, df: pd.DataFrame, group_col: s
 
     st.dataframe(
         breakdown_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             group_col: st.column_config.TextColumn(title_prefix),
@@ -651,9 +676,9 @@ def render_disposition_section(title_prefix: str, df: pd.DataFrame, group_col: s
         },
     )
 
-    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "nps_score", f"NPS by {title_prefix}", color_triplet[0]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "csat_score", f"CSAT by {title_prefix}", color_triplet[1]), use_container_width=True)
-    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "fcr_score", f"FCR by {title_prefix}", color_triplet[2]), use_container_width=True)
+    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "nps_score", f"NPS by {title_prefix}", color_triplet[0]), width="stretch")
+    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "csat_score", f"CSAT by {title_prefix}", color_triplet[1]), width="stretch")
+    st.altair_chart(build_breakdown_metric_chart(breakdown_df, group_col, "fcr_score", f"FCR by {title_prefix}", color_triplet[2]), width="stretch")
 
 
 def render_disposition_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
@@ -740,7 +765,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
 
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "created_at": st.column_config.DatetimeColumn("Created at", format="YYYY-MM-DD HH:mm:ss"),
@@ -816,7 +841,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
 
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "rating_created_at": st.column_config.DatetimeColumn("Rating created_at", format="YYYY-MM-DD HH:mm:ss"),
@@ -837,7 +862,7 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
 
     start_date = st.sidebar.date_input("Start date", value=default_start, key="fetch_start")
     end_date = st.sidebar.date_input("End date", value=today, key="fetch_end")
-    calculate = st.sidebar.button("Calculate", use_container_width=True, type="primary")
+    calculate = st.sidebar.button("Calculate", width="stretch", type="primary")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Scoring logic**")
@@ -905,13 +930,6 @@ def main() -> None:
     merged_df = st.session_state["merged_df"]
     fetched_start = st.session_state["fetched_start"]
     fetched_end = st.session_state["fetched_end"]
-
-    with st.expander("Current data snapshot", expanded=False):
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Ratings rows pulled", f"{len(ratings_df):,}")
-        col_b.metric("Disposition rows pulled", f"{len(dispositions_df):,}")
-        col_c.metric("Merged rows", f"{len(merged_df):,}")
-        st.caption(f"Fetched range: {fetched_start.isoformat()} to {fetched_end.isoformat()}")
 
     overview_tab, operator_tab, disposition_tab, ratings_tab, merged_tab = st.tabs(
         ["Overview", "By operator", "By disposition", "Ratings", "Merged table"]
