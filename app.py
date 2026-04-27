@@ -573,18 +573,19 @@ def get_default_timeline_granularity(start_date: date, end_date: date) -> str:
 def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date, granularity: str) -> pd.DataFrame:
     df = filter_date_range(ratings_df, "created_at_dt", start_date, end_date).copy()
     if df.empty:
-        return pd.DataFrame(columns=["period_start", "metric", "score"])
+        return pd.DataFrame(columns=["period_start", "period_label", "metric", "score"])
 
     ts = pd.to_datetime(df["created_at_dt"], utc=True, errors="coerce").dt.tz_localize(None)
     df["_ts"] = ts
     df = df[df["_ts"].notna()].copy()
 
     if df.empty:
-        return pd.DataFrame(columns=["period_start", "metric", "score"])
+        return pd.DataFrame(columns=["period_start", "period_label", "metric", "score"])
 
     if granularity == "Daily":
         df["period_start"] = df["_ts"].dt.normalize()
         full_periods = pd.date_range(pd.Timestamp(start_date), pd.Timestamp(end_date), freq="D")
+        period_labels = {pd.Timestamp(d): pd.Timestamp(d).strftime("%b %d") for d in full_periods}
 
     elif granularity == "Weekly":
         df["_day"] = df["_ts"].dt.normalize()
@@ -597,10 +598,15 @@ def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date
         aligned_end = aligned_end - pd.to_timedelta(aligned_end.weekday(), unit="D")
 
         full_periods = pd.date_range(aligned_start, aligned_end, freq="7D")
+        period_labels = {}
+        for start in full_periods:
+            end = start + pd.Timedelta(days=6)
+            period_labels[pd.Timestamp(start)] = f"{start.strftime('%b %d')} - {end.strftime('%b %d')}"
 
     else:
         df["period_start"] = df["_ts"].dt.to_period("M").dt.to_timestamp()
         full_periods = pd.date_range(pd.Timestamp(start_date).replace(day=1), pd.Timestamp(end_date), freq="MS")
+        period_labels = {pd.Timestamp(d): pd.Timestamp(d).strftime("%b %Y") for d in full_periods}
 
     rows = []
     for period_start, grp in df.groupby("period_start", dropna=True):
@@ -608,48 +614,76 @@ def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date
         csat_result = calculate_csat(grp)
         fcr_result = calculate_fcr(grp)
 
-        rows.append({"period_start": period_start, "metric": "NPS", "score": nps_result.score})
-        rows.append({"period_start": period_start, "metric": "CSAT", "score": csat_result.score})
-        rows.append({"period_start": period_start, "metric": "FCR", "score": fcr_result.score})
+        label = period_labels.get(pd.Timestamp(period_start), pd.Timestamp(period_start).strftime("%b %d"))
+
+        rows.append({"period_start": period_start, "period_label": label, "metric": "NPS", "score": nps_result.score})
+        rows.append({"period_start": period_start, "period_label": label, "metric": "CSAT", "score": csat_result.score})
+        rows.append({"period_start": period_start, "period_label": label, "metric": "FCR", "score": fcr_result.score})
 
     scored_df = pd.DataFrame(rows)
 
+    template_rows = []
     metric_names = ["NPS", "CSAT", "FCR"]
-    template = pd.MultiIndex.from_product([full_periods, metric_names], names=["period_start", "metric"]).to_frame(index=False)
-    merged = template.merge(scored_df, on=["period_start", "metric"], how="left")
+    for period_start in full_periods:
+        label = period_labels.get(pd.Timestamp(period_start), pd.Timestamp(period_start).strftime("%b %d"))
+        for metric_name in metric_names:
+            template_rows.append(
+                {
+                    "period_start": pd.Timestamp(period_start),
+                    "period_label": label,
+                    "metric": metric_name,
+                }
+            )
+
+    template = pd.DataFrame(template_rows)
+    merged = template.merge(scored_df, on=["period_start", "period_label", "metric"], how="left")
     return merged
 
 def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granularity: str) -> alt.Chart:
     plot_df = df[df["metric"].isin(selected_metrics)].copy()
     if plot_df.empty:
-        return alt.Chart(pd.DataFrame({"period_start": [], "score": [], "metric": []})).mark_line()
+        return alt.Chart(pd.DataFrame({"period_label": [], "score": [], "metric": []})).mark_line()
 
     color_scale = alt.Scale(
         domain=["NPS", "CSAT", "FCR"],
         range=["#2563EB", "#F59E0B", "#10B981"],
     )
 
-    tooltip_title = f"{granularity} period"
+    wide_df = (
+        plot_df.pivot(index=["period_start", "period_label"], columns="metric", values="score")
+        .reset_index()
+        .sort_values("period_start")
+    )
 
     nearest = alt.selection_point(
         nearest=True,
         on="pointerover",
-        fields=["period_start"],
+        fields=["period_label"],
         empty=False,
     )
 
     base = alt.Chart(plot_df).encode(
-        x=alt.X("period_start:T", title=tooltip_title),
+        x=alt.X(
+            "period_label:N",
+            sort=alt.SortField(field="period_start", order="ascending"),
+            title=granularity,
+            axis=alt.Axis(labelAngle=-35),
+        ),
         y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
         color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
     )
 
-    line = base.mark_line(strokeWidth=2.5)
+    line = base.mark_line(strokeWidth=2.5, point=False)
 
     selectors = (
-        alt.Chart(plot_df)
+        alt.Chart(wide_df)
         .mark_point(opacity=0)
-        .encode(x=alt.X("period_start:T"))
+        .encode(
+            x=alt.X(
+                "period_label:N",
+                sort=alt.SortField(field="period_start", order="ascending"),
+            )
+        )
         .add_params(nearest)
     )
 
@@ -658,25 +692,39 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
     )
 
     rules = (
-        alt.Chart(plot_df)
+        alt.Chart(wide_df)
         .mark_rule(color="#94A3B8")
-        .encode(x=alt.X("period_start:T"))
-        .transform_filter(nearest)
-    )
-
-    tooltip_points = (
-        base.mark_point(size=1, opacity=0)
         .encode(
-            tooltip=[
-                alt.Tooltip("period_start:T", title=tooltip_title),
-                alt.Tooltip("metric:N", title="Metric"),
-                alt.Tooltip("score:Q", title="Score", format=".1f"),
-            ]
+            x=alt.X(
+                "period_label:N",
+                sort=alt.SortField(field="period_start", order="ascending"),
+            )
         )
         .transform_filter(nearest)
     )
 
-    return alt.layer(line, selectors, points, rules, tooltip_points).properties(height=360, title="Timeline")
+    tooltip_fields = [alt.Tooltip("period_label:N", title=granularity)]
+    if "NPS" in selected_metrics:
+        tooltip_fields.append(alt.Tooltip("NPS:Q", title="NPS", format=".1f"))
+    if "CSAT" in selected_metrics:
+        tooltip_fields.append(alt.Tooltip("CSAT:Q", title="CSAT", format=".1f"))
+    if "FCR" in selected_metrics:
+        tooltip_fields.append(alt.Tooltip("FCR:Q", title="FCR", format=".1f"))
+
+    tooltip_layer = (
+        alt.Chart(wide_df)
+        .mark_point(opacity=0, size=120)
+        .encode(
+            x=alt.X(
+                "period_label:N",
+                sort=alt.SortField(field="period_start", order="ascending"),
+            ),
+            tooltip=tooltip_fields,
+        )
+        .transform_filter(nearest)
+    )
+
+    return alt.layer(line, selectors, points, rules, tooltip_layer).properties(height=360, title="Timeline")
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
