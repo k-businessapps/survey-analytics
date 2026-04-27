@@ -657,18 +657,21 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
 
     nearest = alt.selection_point(
         nearest=True,
-        on="pointerover",
+        on="mousemove",
         fields=["period_label"],
         empty=False,
+        clear="mouseout",
+    )
+
+    x_enc = alt.X(
+        "period_label:N",
+        sort=alt.SortField(field="period_start", order="ascending"),
+        title=granularity,
+        axis=alt.Axis(labelAngle=-35),
     )
 
     base = alt.Chart(plot_df).encode(
-        x=alt.X(
-            "period_label:N",
-            sort=alt.SortField(field="period_start", order="ascending"),
-            title=granularity,
-            axis=alt.Axis(labelAngle=-35),
-        ),
+        x=x_enc,
         y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
         color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
     )
@@ -677,30 +680,13 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
 
     selectors = (
         alt.Chart(wide_df)
-        .mark_point(opacity=0)
-        .encode(
-            x=alt.X(
-                "period_label:N",
-                sort=alt.SortField(field="period_start", order="ascending"),
-            )
-        )
+        .mark_point(opacity=0.001, size=220)
+        .encode(x=x_enc)
         .add_params(nearest)
     )
 
     points = base.mark_point(size=75).encode(
         opacity=alt.condition(nearest, alt.value(1), alt.value(0))
-    )
-
-    rules = (
-        alt.Chart(wide_df)
-        .mark_rule(color="#94A3B8")
-        .encode(
-            x=alt.X(
-                "period_label:N",
-                sort=alt.SortField(field="period_start", order="ascending"),
-            )
-        )
-        .transform_filter(nearest)
     )
 
     tooltip_fields = [alt.Tooltip("period_label:N", title=granularity)]
@@ -711,20 +697,17 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
     if "FCR" in selected_metrics:
         tooltip_fields.append(alt.Tooltip("FCR:Q", title="FCR", format=".1f"))
 
-    tooltip_layer = (
+    rules = (
         alt.Chart(wide_df)
-        .mark_point(opacity=0, size=120)
+        .mark_rule(color="#94A3B8")
         .encode(
-            x=alt.X(
-                "period_label:N",
-                sort=alt.SortField(field="period_start", order="ascending"),
-            ),
+            x=x_enc,
             tooltip=tooltip_fields,
         )
         .transform_filter(nearest)
     )
 
-    return alt.layer(line, selectors, points, rules, tooltip_layer).properties(height=360, title="Timeline")
+    return alt.layer(line, selectors, points, rules).properties(height=360, title="Timeline")
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
