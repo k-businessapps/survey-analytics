@@ -655,13 +655,8 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
         .sort_values("period_start")
     )
 
-    nearest = alt.selection_point(
-        nearest=True,
-        on="mousemove",
-        fields=["period_label"],
-        empty=False,
-        clear="mouseout",
-    )
+    wide_df["y0"] = -100
+    wide_df["y1"] = 100
 
     x_enc = alt.X(
         "period_label:N",
@@ -670,23 +665,23 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
         axis=alt.Axis(labelAngle=-35),
     )
 
+    hover = alt.selection_point(
+        fields=["period_label"],
+        on="mouseover",
+        empty=False,
+        clear="mouseout",
+    )
+
     base = alt.Chart(plot_df).encode(
         x=x_enc,
         y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
         color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
     )
 
-    line = base.mark_line(strokeWidth=2.5, point=False)
+    line = base.mark_line(strokeWidth=2.5)
 
-    selectors = (
-        alt.Chart(wide_df)
-        .mark_point(opacity=0.001, size=220)
-        .encode(x=x_enc)
-        .add_params(nearest)
-    )
-
-    points = base.mark_point(size=75).encode(
-        opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+    points = base.mark_point(size=80).encode(
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
     )
 
     tooltip_fields = [alt.Tooltip("period_label:N", title=granularity)]
@@ -697,17 +692,26 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
     if "FCR" in selected_metrics:
         tooltip_fields.append(alt.Tooltip("FCR:Q", title="FCR", format=".1f"))
 
-    rules = (
+    hover_band = (
         alt.Chart(wide_df)
-        .mark_rule(color="#94A3B8")
+        .mark_bar(opacity=0)
         .encode(
             x=x_enc,
+            y=alt.Y("y0:Q", scale=alt.Scale(domain=[-100, 100]), title="Score"),
+            y2="y1:Q",
             tooltip=tooltip_fields,
         )
-        .transform_filter(nearest)
+        .add_params(hover)
     )
 
-    return alt.layer(line, selectors, points, rules).properties(height=360, title="Timeline")
+    rule = (
+        alt.Chart(wide_df)
+        .mark_rule(color="#94A3B8")
+        .encode(x=x_enc)
+        .transform_filter(hover)
+    )
+
+    return alt.layer(hover_band, line, points, rule).properties(height=360, title="Timeline")
 
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
