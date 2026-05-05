@@ -718,28 +718,30 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
 
     with st.container(border=True):
-        f1, f2, f3, f4, f5, f6 = st.columns([0.9, 0.9, 1.4, 1.2, 1.2, 1.2])
+        f1, f2, f3 = st.columns([0.9, 0.9, 1.4])
         with f1:
             start_date = st.date_input("FROM", value=fetched_start, min_value=fetched_start, max_value=fetched_end, key="ov_start")
         with f2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="ov_end")
         with f3:
             operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ov_operators")
-        with f4:
+
+        g1, g2, g3 = st.columns(3)
+        with g1:
             categories = st.multiselect(
                 "Disposition category",
                 options=normalize_text_options(merged_df["category"] if "category" in merged_df else pd.Series(dtype="object")),
                 key="ov_categories",
             )
-        with f5:
+        with g2:
             types = st.multiselect(
                 "Disposition type",
                 options=normalize_text_options(merged_df["type"] if "type" in merged_df else pd.Series(dtype="object")),
                 key="ov_types",
             )
-        with f6:
+        with g3:
             sub_types = st.multiselect(
-                "Disposition sub_type",
+                "Disposition sub-type",
                 options=normalize_text_options(merged_df["sub_type"] if "sub_type" in merged_df else pd.Series(dtype="object")),
                 key="ov_sub_types",
             )
@@ -761,8 +763,10 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     with c3:
         render_metric_card("FCR resolution", fcr_result.score, "%", f"Answered responses: {fcr_result.answered}", metric_tone("fcr", fcr_result.score))
 
-    note = "Disposition filters are active. Metrics are being scoped through the merged table." if using_dispositions else "No disposition filters are active. Metrics are based on the ratings table only."
+    note = "Disposition filters active — metrics scoped through the merged table." if using_dispositions else "No disposition filters active — metrics based on the ratings table."
     st.markdown(f'<div class="note-card">{note}</div>', unsafe_allow_html=True)
+
+    st.divider()
 
     chart_col1, chart_col2, chart_col3 = st.columns(3)
     with chart_col1:
@@ -780,28 +784,29 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     stats_mid.metric("Distinct sessions in scope", f"{metric_df['session_id'].nunique():,}" if not metric_df.empty else "0")
     stats_right.metric("Merged rows matched", f"{len(merged_filtered):,}" if using_dispositions else "0")
 
-    st.markdown("### Timeline")
-    st.caption("This timeline is based on the overall fetched ratings data and does not use the Overview filters.")
-    default_granularity = get_default_timeline_granularity(fetched_start, fetched_end)
+    st.divider()
+    st.subheader("Timeline")
 
-    tl1, tl2 = st.columns([1.2, 2.4])
-    with tl1:
-        granularity = st.radio(
-            "Group by",
-            options=["Daily", "Weekly", "Monthly"],
-            index=["Daily", "Weekly", "Monthly"].index(default_granularity),
-            horizontal=True,
-            key="timeline_granularity",
-        )
-    with tl2:
-        selected_metrics = st.multiselect(
-            "Show metrics",
-            options=["NPS", "CSAT", "FCR"],
-            default=["NPS", "CSAT", "FCR"],
-            key="timeline_metrics",
-        )
+    with st.container(border=True):
+        tl1, tl2 = st.columns([1.2, 2.4])
+        with tl1:
+            default_granularity = get_default_timeline_granularity(start_date, end_date)
+            granularity = st.radio(
+                "Group by",
+                options=["Daily", "Weekly", "Monthly"],
+                index=["Daily", "Weekly", "Monthly"].index(default_granularity),
+                horizontal=True,
+                key="timeline_granularity",
+            )
+        with tl2:
+            selected_metrics = st.multiselect(
+                "Show metrics",
+                options=["NPS", "CSAT", "FCR"],
+                default=["NPS", "CSAT", "FCR"],
+                key="timeline_metrics",
+            )
 
-    timeline_df = build_timeline_df(ratings_df, fetched_start, fetched_end, granularity)
+    timeline_df = build_timeline_df(metric_df, start_date, end_date, granularity)
     if selected_metrics:
         st.altair_chart(build_timeline_chart(timeline_df, selected_metrics, granularity), width="stretch")
     else:
