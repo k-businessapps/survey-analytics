@@ -206,9 +206,16 @@ def get_api_config() -> Tuple[str, str]:
     return api_key, base_url
 
 
-def metric_tone(metric_name: str, value: Optional[float]) -> str:
+def metric_tone(metric_name: str, value: Optional[float], use_positive_csat: bool = False) -> str:
     if value is None:
         return "neutral"
+
+    if metric_name == "csat" and use_positive_csat:
+        if value < 60:
+            return "poor"
+        if value < 80:
+            return "good"
+        return "excellent"
 
     if metric_name in {"nps", "csat"}:
         if value < 0:
@@ -265,11 +272,22 @@ def calculate_nps(df: pd.DataFrame) -> MetricResult:
     )
 
 
-def calculate_csat(df: pd.DataFrame) -> MetricResult:
+def calculate_csat(df: pd.DataFrame, use_positive_csat: bool = False) -> MetricResult:
     series = pd.to_numeric(df.get("csat"), errors="coerce").dropna()
     total = int(len(series))
     if total == 0:
         return MetricResult(score=None, answered=0, extra={})
+
+    if use_positive_csat:
+        positive = int(series.isin([4, 5]).sum())
+        non_positive = int(total - positive)
+        score = (positive / total) * 100
+
+        return MetricResult(
+            score=round(float(score), 1),
+            answered=total,
+            extra={"Positive (4-5)": positive, "Other (0-3)": non_positive},
+        )
 
     promoters = int((series == 5).sum())
     neutral = int((series == 4).sum())
@@ -337,6 +355,12 @@ def build_metric_bar_chart(df: pd.DataFrame, title: str, color_mode: str = "tri"
             range=[BRAND["excellent"], BRAND["neutral"], BRAND["poor"]][: len(df)],
         )
         color = alt.Color("label:N", scale=color_scale, legend=None)
+    elif color_mode == "positive":
+        color_scale = alt.Scale(
+            domain=df["label"].tolist(),
+            range=[BRAND["excellent"], BRAND["poor"]][: len(df)],
+        )
+        color = alt.Color("label:N", scale=color_scale, legend=None)
     else:
         color = alt.value(BRAND["primary"])
 
@@ -367,6 +391,22 @@ def normalize_operator_first_name(series: pd.Series) -> pd.Series:
     return s.str.split().str[0]
 
 
+def add_operator_first_name_columns(
+    ratings_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ratings_out = ratings_df.copy()
+    merged_out = merged_df.copy()
+
+    if "last_operator_name" in ratings_out.columns:
+        ratings_out["last_operator_first_name"] = normalize_operator_first_name(ratings_out["last_operator_name"])
+
+    if "rating_last_operator_name" in merged_out.columns:
+        merged_out["rating_operator_first_name"] = normalize_operator_first_name(merged_out["rating_last_operator_name"])
+
+    return ratings_out, merged_out
+
+
 def get_response_session_count(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
@@ -384,7 +424,7 @@ def get_response_session_count(df: pd.DataFrame) -> int:
     return int(work["session_id"].astype(str).nunique())
 
 
-def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str, use_positive_csat: bool = False) -> pd.DataFrame:
     if df.empty or group_col not in df.columns:
         return pd.DataFrame(
             columns=[
@@ -419,7 +459,7 @@ def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -
         response_sessions = int(grp.loc[grp["any_response"], "session_id"].astype(str).nunique())
 
         nps_result = calculate_nps(grp)
-        csat_result = calculate_csat(grp)
+        csat_result = calculate_csat(grp, use_positive_csat)
         fcr_result = calculate_fcr(grp)
 
         rows.append(
@@ -441,7 +481,7 @@ def calculate_breakdown_metrics_from_ratings(df: pd.DataFrame, group_col: str) -
     return out.sort_values(["response_sessions", group_col], ascending=[False, True]).reset_index(drop=True)
 
 
-def calculate_breakdown_metrics_from_merged(merged_df: pd.DataFrame, group_col: str, category_value: str) -> pd.DataFrame:
+def calculate_breakdown_metrics_from_merged(merged_df: pd.DataFrame, group_col: str, category_value: str, use_positive_csat: bool = False) -> pd.DataFrame:
     if merged_df.empty or group_col not in merged_df.columns:
         return pd.DataFrame()
 
@@ -471,7 +511,7 @@ def calculate_breakdown_metrics_from_merged(merged_df: pd.DataFrame, group_col: 
         response_sessions = int(grp.loc[grp["any_response"], "session_id"].astype(str).nunique())
 
         nps_result = calculate_nps(grp)
-        csat_result = calculate_csat(grp)
+        csat_result = calculate_csat(grp, use_positive_csat)
         fcr_result = calculate_fcr(grp)
 
         rows.append(
@@ -543,7 +583,7 @@ def compute_overview_dataset(
     sub_types: list[str],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, bool]:
     ratings_filtered = filter_date_range(ratings_df, "created_at_dt", start_date, end_date)
-    ratings_filtered = filter_multiselect(ratings_filtered, "last_operator_name", operators)
+    ratings_filtered = filter_multiselect(ratings_filtered, "last_operator_first_name", operators)
 
     disposition_filter_selected = any([categories, types, sub_types])
     if not disposition_filter_selected:
@@ -551,7 +591,7 @@ def compute_overview_dataset(
 
     merged_filtered = merged_df.copy()
     merged_filtered = filter_date_range(merged_filtered, "rating_created_at_dt", start_date, end_date)
-    merged_filtered = filter_multiselect(merged_filtered, "rating_last_operator_name", operators)
+    merged_filtered = filter_multiselect(merged_filtered, "rating_operator_first_name", operators)
     merged_filtered = filter_multiselect(merged_filtered, "category", categories)
     merged_filtered = filter_multiselect(merged_filtered, "type", types)
     merged_filtered = filter_multiselect(merged_filtered, "sub_type", sub_types)
@@ -570,7 +610,7 @@ def get_default_timeline_granularity(start_date: date, end_date: date) -> str:
     return "Monthly"
 
 
-def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date, granularity: str) -> pd.DataFrame:
+def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date, granularity: str, use_positive_csat: bool = False) -> pd.DataFrame:
     df = filter_date_range(ratings_df, "created_at_dt", start_date, end_date).copy()
     if df.empty:
         return pd.DataFrame(columns=["period_start", "period_label", "metric", "score"])
@@ -611,7 +651,7 @@ def build_timeline_df(ratings_df: pd.DataFrame, start_date: date, end_date: date
     rows = []
     for period_start, grp in df.groupby("period_start", dropna=True):
         nps_result = calculate_nps(grp)
-        csat_result = calculate_csat(grp)
+        csat_result = calculate_csat(grp, use_positive_csat)
         fcr_result = calculate_fcr(grp)
 
         label = period_labels.get(pd.Timestamp(period_start), pd.Timestamp(period_start).strftime("%b %d"))
@@ -713,7 +753,7 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
 
     return alt.layer(hover_band, line, points, rule).properties(height=360, title="Timeline")
 
-def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
+def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date, use_positive_csat: bool) -> None:
     st.subheader("Overview")
     st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
 
@@ -724,7 +764,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
         with f2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="ov_end")
         with f3:
-            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ov_operators")
+            operators = st.multiselect("Operator / Agent first name", options=normalize_text_options(ratings_df["last_operator_first_name"]), key="ov_operators")
 
         g1, g2, g3 = st.columns(3)
         with g1:
@@ -751,7 +791,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     )
 
     nps_result = calculate_nps(metric_df)
-    csat_result = calculate_csat(metric_df)
+    csat_result = calculate_csat(metric_df, use_positive_csat)
     fcr_result = calculate_fcr(metric_df)
     response_sessions = get_response_session_count(metric_df)
 
@@ -759,7 +799,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     with c1:
         render_metric_card("NPS score", nps_result.score, "%", f"Answered responses: {nps_result.answered}", metric_tone("nps", nps_result.score))
     with c2:
-        render_metric_card("CSAT score", csat_result.score, "%", f"Answered responses: {csat_result.answered}", metric_tone("csat", csat_result.score))
+        render_metric_card("CSAT score", csat_result.score, "%", f"Answered responses: {csat_result.answered}", metric_tone("csat", csat_result.score, use_positive_csat))
     with c3:
         render_metric_card("FCR resolution", fcr_result.score, "%", f"Answered responses: {fcr_result.answered}", metric_tone("fcr", fcr_result.score))
 
@@ -774,7 +814,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
         st.altair_chart(build_metric_bar_chart(nps_dist, "NPS distribution"), width="stretch")
     with chart_col2:
         csat_dist = build_distribution_df(csat_result.extra, csat_result.answered)
-        st.altair_chart(build_metric_bar_chart(csat_dist, "CSAT distribution"), width="stretch")
+        st.altair_chart(build_metric_bar_chart(csat_dist, "CSAT distribution", "positive" if use_positive_csat else "tri"), width="stretch")
     with chart_col3:
         fcr_dist = build_distribution_df(fcr_result.extra, fcr_result.answered)
         st.altair_chart(build_metric_bar_chart(fcr_dist, "FCR distribution"), width="stretch")
@@ -806,14 +846,14 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
                 key="timeline_metrics",
             )
 
-    timeline_df = build_timeline_df(metric_df, start_date, end_date, granularity)
+    timeline_df = build_timeline_df(metric_df, start_date, end_date, granularity, use_positive_csat)
     if selected_metrics:
         st.altair_chart(build_timeline_chart(timeline_df, selected_metrics, granularity), width="stretch")
     else:
         st.info("Select at least one metric to display the timeline.")
 
 
-def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
+def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_end: date, use_positive_csat: bool) -> None:
     st.subheader("By operator")
     st.caption("NPS, CSAT, and FCR percentages grouped by operator first name using last operator. Response counts use unique sessions with at least one of NPS, CSAT, or FCR filled.")
 
@@ -824,14 +864,14 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
         with c2:
             end_date = st.date_input("TO", value=fetched_end, min_value=fetched_start, max_value=fetched_end, key="op_end")
         with c3:
-            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="op_operators")
+            operators = st.multiselect("Operator / Agent first name", options=normalize_text_options(ratings_df["last_operator_first_name"]), key="op_operators")
 
     filtered = filter_date_range(ratings_df, "created_at_dt", start_date, end_date)
-    filtered = filter_multiselect(filtered, "last_operator_name", operators)
+    filtered = filter_multiselect(filtered, "last_operator_first_name", operators)
     filtered = filtered.copy()
-    filtered["operator_first_name"] = normalize_operator_first_name(filtered["last_operator_name"])
+    filtered["operator_first_name"] = filtered["last_operator_first_name"]
 
-    operator_df = calculate_breakdown_metrics_from_ratings(filtered, "operator_first_name")
+    operator_df = calculate_breakdown_metrics_from_ratings(filtered, "operator_first_name", use_positive_csat)
 
     summary1, summary2, summary3 = st.columns(3)
     summary1.metric("Operators", f"{len(operator_df):,}")
@@ -859,7 +899,7 @@ def render_operator_tab(ratings_df: pd.DataFrame, fetched_start: date, fetched_e
     st.altair_chart(build_operator_metric_chart(operator_df, "fcr_score", "FCR by operator", BRAND["secondary"]), width="stretch")
 
 
-def render_disposition_tab(merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
+def render_disposition_tab(merged_df: pd.DataFrame, fetched_start: date, fetched_end: date, use_positive_csat: bool) -> None:
     st.subheader("By disposition")
     st.caption("Select one disposition category at a time, then review Type and Sub-Type breakdowns underneath it.")
 
@@ -884,8 +924,8 @@ def render_disposition_tab(merged_df: pd.DataFrame, fetched_start: date, fetched
         st.info("No merged rows matched the selected category and date range.")
         return
 
-    type_df = calculate_breakdown_metrics_from_merged(filtered, "type", selected_category)
-    subtype_df = calculate_breakdown_metrics_from_merged(filtered, "sub_type", selected_category)
+    type_df = calculate_breakdown_metrics_from_merged(filtered, "type", selected_category, use_positive_csat)
+    subtype_df = calculate_breakdown_metrics_from_merged(filtered, "sub_type", selected_category, use_positive_csat)
 
     st.markdown(f"#### Category: {selected_category}")
     st.metric("Distinct sessions in scope", f"{filtered['session_id'].nunique():,}")
@@ -952,7 +992,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
         with r2:
             end_date = st.date_input("Date to", value=max_date, min_value=min_date, max_value=max_date, key="ratings_end")
         with r3:
-            operators = st.multiselect("Last Operator", options=normalize_text_options(ratings_df["last_operator_name"]), key="ratings_operators")
+            operators = st.multiselect("Operator / Agent first name", options=normalize_text_options(ratings_df["last_operator_first_name"]), key="ratings_operators")
         with r4:
             fcr_values = st.multiselect("FCR", options=normalize_text_options(ratings_df["fcr_normalized"]), key="ratings_fcr")
 
@@ -961,7 +1001,7 @@ def render_ratings_tab(ratings_df: pd.DataFrame) -> None:
         csat_operator, csat_value = render_numeric_filter_controls("ratings", "CSAT", csat_col1, csat_col2)
 
     filtered = filter_date_range(ratings_df, "created_at_dt", start_date, end_date)
-    filtered = filter_multiselect(filtered, "last_operator_name", operators)
+    filtered = filter_multiselect(filtered, "last_operator_first_name", operators)
     filtered = filter_multiselect(filtered, "fcr_normalized", fcr_values)
     filtered = apply_numeric_filter(filtered, "nps", nps_operator, nps_value)
     filtered = apply_numeric_filter(filtered, "csat", csat_operator, csat_value)
@@ -1025,7 +1065,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
 
         m5, m6, m7, m8 = st.columns([1.2, 1.2, 1.2, 1.2])
         with m5:
-            operators = st.multiselect("Last Operator", options=normalize_text_options(merged_df["rating_last_operator_name"]), key="merged_rating_operators")
+            operators = st.multiselect("Operator / Agent first name", options=normalize_text_options(merged_df["rating_operator_first_name"]), key="merged_rating_operators")
         with m6:
             categories = st.multiselect("Category", options=normalize_text_options(merged_df["category"]), key="merged_categories")
         with m7:
@@ -1045,7 +1085,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
 
     filtered = filter_date_range(merged_df, "rating_created_at_dt", rating_start, rating_end)
     filtered = filter_date_range(filtered, "disposition_created_at_dt", disp_start, disp_end)
-    filtered = filter_multiselect(filtered, "rating_last_operator_name", operators)
+    filtered = filter_multiselect(filtered, "rating_operator_first_name", operators)
     filtered = filter_multiselect(filtered, "category", categories)
     filtered = filter_multiselect(filtered, "type", types)
     filtered = filter_multiselect(filtered, "sub_type", sub_types)
@@ -1097,7 +1137,7 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
     )
 
 
-def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
+def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool, bool]:
     st.sidebar.header("Data pull")
     st.sidebar.caption("Pull fresh data from the KrispCall support APIs, then slice it inside the app.")
     today = date.today()
@@ -1108,12 +1148,23 @@ def render_sidebar_controls() -> Tuple[Optional[date], Optional[date], bool]:
     calculate = st.sidebar.button("Calculate", width="stretch", type="primary")
 
     st.sidebar.markdown("---")
+    use_positive_csat = st.sidebar.toggle(
+        "Use positive CSAT formula",
+        value=True,
+        help="When enabled, CSAT = percentage of CSAT submissions with score 4 or 5. When disabled, CSAT uses the old NPS-style formula.",
+    )
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown("**Scoring logic**")
     st.sidebar.markdown("- **NPS**: 5 = promoter, 4 = neutral, 0-3 = detractor")
-    st.sidebar.markdown("- **CSAT**: 5 = promoter, 4 = neutral, 0-3 = detractor")
+    if use_positive_csat:
+        st.sidebar.markdown("- **CSAT**: positive scores 4-5 / total CSAT submissions")
+    else:
+        st.sidebar.markdown("- **CSAT**: 5 = promoter, 4 = neutral, 0-3 = detractor")
     st.sidebar.markdown("- **FCR**: yes / total filled")
     st.sidebar.markdown("- **Response total**: unique sessions with at least one of NPS, CSAT, or FCR filled")
-    return start_date, end_date, calculate
+    st.sidebar.markdown("- **Operator filters**: grouped by first name, so Lisa Palmer and Lisa both appear under Lisa")
+    return start_date, end_date, calculate, use_positive_csat
 
 
 def main() -> None:
@@ -1128,7 +1179,7 @@ def main() -> None:
         st.error("API key is missing. Add it to .streamlit/secrets.toml under [api].")
         st.stop()
 
-    start_date, end_date, calculate = render_sidebar_controls()
+    start_date, end_date, calculate, use_positive_csat = render_sidebar_controls()
     if start_date > end_date:
         st.error("Start date must be before or equal to end date.")
         st.stop()
@@ -1142,6 +1193,7 @@ def main() -> None:
                     combine_date_and_time(start_date, is_end=False),
                     combine_date_and_time(end_date, is_end=True),
                 )
+            ratings_df, merged_df = add_operator_first_name_columns(ratings_df, merged_df)
             st.session_state["ratings_df"] = ratings_df
             st.session_state["dispositions_df"] = dispositions_df
             st.session_state["merged_df"] = merged_df
@@ -1167,6 +1219,9 @@ def main() -> None:
 
     ratings_df = st.session_state["ratings_df"]
     merged_df = st.session_state["merged_df"]
+    ratings_df, merged_df = add_operator_first_name_columns(ratings_df, merged_df)
+    st.session_state["ratings_df"] = ratings_df
+    st.session_state["merged_df"] = merged_df
     fetched_start = st.session_state["fetched_start"]
     fetched_end = st.session_state["fetched_end"]
 
@@ -1174,11 +1229,11 @@ def main() -> None:
         ["Overview", "By operator", "By disposition", "Ratings", "Merged table"]
     )
     with overview_tab:
-        render_overview_tab(ratings_df, merged_df, fetched_start, fetched_end)
+        render_overview_tab(ratings_df, merged_df, fetched_start, fetched_end, use_positive_csat)
     with operator_tab:
-        render_operator_tab(ratings_df, fetched_start, fetched_end)
+        render_operator_tab(ratings_df, fetched_start, fetched_end, use_positive_csat)
     with disposition_tab:
-        render_disposition_tab(merged_df, fetched_start, fetched_end)
+        render_disposition_tab(merged_df, fetched_start, fetched_end, use_positive_csat)
     with ratings_tab:
         render_ratings_tab(ratings_df)
     with merged_tab:
