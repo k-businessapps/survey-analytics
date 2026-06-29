@@ -838,6 +838,52 @@ def build_timeline_chart(df: pd.DataFrame, selected_metrics: list[str], granular
 
     return alt.layer(hover_band, line, points, rule).properties(height=360, title="Timeline")
 
+
+def build_timeline_bar_chart(df: pd.DataFrame, selected_metrics: list[str], granularity: str) -> alt.Chart:
+    plot_df = df[df["metric"].isin(selected_metrics)].copy()
+    if plot_df.empty:
+        return alt.Chart(pd.DataFrame({"period_label": [], "score": [], "metric": []})).mark_bar()
+
+    color_scale = alt.Scale(
+        domain=["NPS", "CSAT", "FCR"],
+        range=["#2563EB", "#F59E0B", "#10B981"],
+    )
+
+    base = alt.Chart(plot_df).encode(
+        x=alt.X(
+            "period_label:N",
+            sort=alt.SortField(field="period_start", order="ascending"),
+            title=granularity,
+            axis=alt.Axis(labelAngle=-35),
+        ),
+        xOffset=alt.XOffset("metric:N", sort=None),
+        y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-100, 100])),
+        color=alt.Color("metric:N", scale=color_scale, legend=alt.Legend(title="Metric")),
+        tooltip=["period_label:N", "metric:N", "score:Q"],
+    )
+
+    bars = base.mark_bar(opacity=0.9, cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+    labels = (
+        alt.Chart(plot_df)
+        .mark_text(dy=-8, fontSize=12, fontWeight="bold", color="#241138")
+        .encode(
+            x=alt.X(
+                "period_label:N",
+                sort=alt.SortField(field="period_start", order="ascending"),
+            ),
+            xOffset=alt.XOffset("metric:N", sort=None),
+            y=alt.Y("score:Q"),
+            text=alt.Text("score:Q", format=".1f"),
+        )
+    )
+
+    return (bars + labels).properties(
+        height=430,
+        width=900,
+        title="Timeline comparison",
+    )
+
+
 def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetched_start: date, fetched_end: date) -> None:
     st.subheader("Overview")
     st.caption("Metrics use ratings by default. When disposition filters are applied, the rating scope is narrowed through the merged table without double counting sessions.")
@@ -938,6 +984,7 @@ def render_overview_tab(ratings_df: pd.DataFrame, merged_df: pd.DataFrame, fetch
     timeline_df = build_timeline_df(metric_df, start_date, end_date, granularity, use_new_scoring)
     if selected_metrics:
         st.altair_chart(build_timeline_chart(timeline_df, selected_metrics, granularity), width="stretch")
+        st.altair_chart(build_timeline_bar_chart(timeline_df, selected_metrics, granularity), width="stretch")
     else:
         st.info("Select at least one metric to display the timeline.")
 
