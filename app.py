@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -1193,17 +1192,6 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
     st.subheader("Merged raw data")
     st.caption("This tab keeps ratings filters and adds disposition filters. To avoid ambiguity, both rating and disposition created_at filters are available.")
 
-    # Export the complete API-fetched merged dataset, independent of tab filters and pagination.
-    st.download_button(
-        label=f"Download full merged table ({len(merged_df):,} rows)",
-        data=merged_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="krispcall_full_merged_table.csv",
-        mime="text/csv",
-        key="download_full_merged_table",
-        disabled=merged_df.empty,
-    )
-    st.caption("CSV includes all rows and columns from the selected API pull. The filters below only change the on-screen view.")
-
     rating_min, rating_max = get_default_date_bounds(merged_df, "rating_created_at_dt")
     disp_min, disp_max = get_default_date_bounds(merged_df, "disposition_created_at_dt")
 
@@ -1254,12 +1242,10 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
     merged_mid.metric("Distinct sessions", f"{filtered['session_id'].nunique():,}" if not filtered.empty else "0")
     merged_right.metric("Categories", f"{filtered['category'].nunique():,}" if not filtered.empty else "0")
 
-    page_size = st.selectbox("Rows per page", options=[25, 50, 100, 200], index=1, key="merged_page_size")
-    page = st.number_input("Page", min_value=1, value=1, step=1, key="merged_page")
-    page_df, total_pages = paginate_dataframe(filtered, int(page), int(page_size))
-    st.caption(f"Page {min(int(page), total_pages)} of {total_pages}")
-
-    columns = [
+    # Export exactly the rows currently in the Merged raw data table,
+    # including every page, after all on-screen filters have been applied.
+    # Do not export the unfiltered merged_df or the paginated page_df.
+    table_columns = [
         "rating_created_at",
         "disposition_created_at",
         "rating_last_operator_name",
@@ -1274,7 +1260,23 @@ def render_merged_tab(merged_df: pd.DataFrame) -> None:
         "session_id",
         "chat_link",
     ]
-    existing_cols = [col for col in columns if col in page_df.columns]
+    existing_cols = [col for col in table_columns if col in filtered.columns]
+    export_df = filtered.loc[:, existing_cols]
+    st.download_button(
+        label=f"Download displayed Merged Table ({len(filtered):,} rows)",
+        data=export_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="krispcall_merged_table_filtered.csv",
+        mime="text/csv",
+        key="download_merged_table_all_pages",
+        disabled=filtered.empty,
+    )
+    st.caption("Downloads all rows matching the filters above, not just the current page. Includes the same columns as the table below.")
+
+    page_size = st.selectbox("Rows per page", options=[25, 50, 100, 200], index=1, key="merged_page_size")
+    page = st.number_input("Page", min_value=1, value=1, step=1, key="merged_page")
+    page_df, total_pages = paginate_dataframe(filtered, int(page), int(page_size))
+    st.caption(f"Page {min(int(page), total_pages)} of {total_pages}")
+
     display_df = page_df[existing_cols].copy() if not page_df.empty else pd.DataFrame(columns=existing_cols)
 
     st.dataframe(
